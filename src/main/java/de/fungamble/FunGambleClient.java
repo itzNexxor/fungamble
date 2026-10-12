@@ -1,631 +1,192 @@
 package de.fungamble;
 
-import com.mojang.brigadier.arguments.LongArgumentType;
-import com.mojang.brigadier.builder.RequiredArgumentBuilder;
-import com.mojang.brigadier.context.CommandContext;
-import net.fabricmc.api.ClientModInitializer;
-import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
-import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
-import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
-import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.sound.PositionedSoundInstance;
-import net.minecraft.sound.SoundEvent;
-import net.minecraft.sound.SoundEvents;
+import net.minecraft.client.gui.screen.Screen;
+import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
-import java.util.Random;
-import java.util.Set;
-import java.util.function.IntConsumer;
-import java.util.function.Supplier;
 
-/**
- * Reine Client-Mod: Alles passiert nur bei dir lokal.
- * Der Server (und andere Spieler) bekommen davon nichts mit.
- * Spielgeld ist nicht echt und hat nichts mit Items im Spiel zu tun.
- *
- * Version 1.2: Slots, Muenzwurf, Wuerfeln, Roulette, Gluecksrad, Hoch/Tief, Crash, Blackjack.
- */
-public class FunGambleClient implements ClientModInitializer {
+/** Das Casino-Menue. Oeffnen mit /gamble oder /gamble menu. */
+public class GambleScreen extends Screen {
 
-	private static final long START_MONEY = 1000;
-	private static final Random RNG = new Random();
-	private static final Set<Integer> RED = Set.of(1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36);
-	private static final String[] SYMBOLS = {"Kirsche", "Zitrone", "Glocke", "Stern", "Diamant", "7"};
-	private static final Formatting[] SYMBOL_COLORS = {
-		Formatting.RED, Formatting.YELLOW, Formatting.GOLD, Formatting.AQUA, Formatting.BLUE, Formatting.DARK_RED
-	};
-	private static final double[] WHEEL = {0, 0, 0, 0, 0, 0.5, 0.5, 1, 1, 1.5, 2, 5};
+	private static final long[] BETS = {10, 50, 100, 500, 1000, 5000, -1}; // -1 = All-in
+	private static int betIndex = 2;
 
-	private static long balance = START_MONEY;
-	private static Path saveFile;
+	private ButtonWidget balanceLabel;
+	private ButtonWidget status1;
+	private ButtonWidget status2;
+	private ButtonWidget betButton;
 
-	// Runde mit Animation (Slots, Muenzwurf, Wuerfeln, Roulette, Rad, Hoch/Tief)
-	private static Game running = null;
-	private static long runningBet = 0;
-	private static int runningTick = 0;
+	public GambleScreen() {
+		super(Text.literal("Fun Gamble Casino"));
+	}
 
-	// Crash
-	private static boolean crashActive = false;
-	private static long crashBet = 0;
-	private static double crashPoint = 1.0;
-	private static int crashTicks = 0;
+	private static long bet() {
+		long b = BETS[betIndex];
+		return b < 0 ? Math.max(1, FunGambleClient.getBalance()) : b;
+	}
 
-	// Blackjack
-	private static boolean bjActive = false;
-	private static long bjBet = 0;
-	private static final List<Integer> bjPlayer = new ArrayList<>();
-	private static final List<Integer> bjDealer = new ArrayList<>();
+	private static Text betText() {
+		String amount = BETS[betIndex] < 0 ? "ALL-IN (" + bet() + ")" : String.valueOf(BETS[betIndex]);
+		return Text.literal("Einsatz: " + amount + "  (klicken zum Ändern)").formatted(Formatting.AQUA);
+	}
 
-	/** Ergebnis steht schon fest, die Animation zeigt es nur nach und nach. */
-	private record Game(double multiplier, Text result, int duration, IntConsumer tick) {}
+	private ButtonWidget label(int x, int y, int w) {
+		ButtonWidget b = ButtonWidget.builder(Text.empty(), btn -> {}).dimensions(x, y, w, 18).build();
+		b.active = false;
+		return this.addDrawableChild(b);
+	}
+
+	private ButtonWidget button(int x, int y, int w, String text, Runnable action) {
+		ButtonWidget b = ButtonWidget.builder(Text.literal(text), btn -> action.run()).dimensions(x, y, w, 18).build();
+		return this.addDrawableChild(b);
+	}
 
 	@Override
-	public void onInitializeClient() {
-		saveFile = FabricLoader.getInstance().getConfigDir().resolve("fungamble.txt");
-		load();
+	protected void init() {
+		final int w = 260;
+		final int half = (w - 4) / 2;
+		final int rowH = 20;
+		final int x = (this.width - w) / 2;
+		final int x2 = x + half + 4;
+		int y = Math.max(4, (this.height - 13 * rowH) / 2);
 
-		ClientTickEvents.END_CLIENT_TICK.register(client -> tickAll());
+		balanceLabel = label(x, y, w);
+		y += rowH;
+		status1 = label(x, y, w);
+		y += rowH;
+		status2 = label(x, y, w);
+		y += rowH;
 
-		ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
-			dispatcher.register(ClientCommandManager.literal("gamble")
-				.executes(ctx -> help())
-				.then(ClientCommandManager.literal("balance").executes(ctx -> showBalance()))
-				.then(ClientCommandManager.literal("reset").executes(ctx -> reset()))
-				.then(ClientCommandManager.literal("coinflip").then(bet()
-					.then(ClientCommandManager.literal("kopf").executes(ctx -> play(ctx, () -> coinflip(true))))
-					.then(ClientCommandManager.literal("zahl").executes(ctx -> play(ctx, () -> coinflip(false))))))
-				.then(ClientCommandManager.literal("slots").then(bet()
-					.executes(ctx -> play(ctx, FunGambleClient::slots))))
-				.then(ClientCommandManager.literal("dice").then(bet()
-					.executes(ctx -> play(ctx, FunGambleClient::dice))))
-				.then(ClientCommandManager.literal("roulette").then(bet()
-					.then(ClientCommandManager.literal("rot").executes(ctx -> play(ctx, () -> roulette("rot"))))
-					.then(ClientCommandManager.literal("schwarz").executes(ctx -> play(ctx, () -> roulette("schwarz"))))
-					.then(ClientCommandManager.literal("gruen").executes(ctx -> play(ctx, () -> roulette("gruen"))))))
-				.then(ClientCommandManager.literal("wheel").then(bet()
-					.executes(ctx -> play(ctx, FunGambleClient::wheel))))
-				.then(ClientCommandManager.literal("highlow").then(bet()
-					.then(ClientCommandManager.literal("hoch").executes(ctx -> play(ctx, () -> highLow(true))))
-					.then(ClientCommandManager.literal("tief").executes(ctx -> play(ctx, () -> highLow(false))))))
-				.then(ClientCommandManager.literal("crash").then(bet()
-					.executes(ctx -> startCrash(ctx))))
-				.then(ClientCommandManager.literal("cashout").executes(ctx -> cashout()))
-				.then(ClientCommandManager.literal("blackjack").then(bet()
-					.executes(ctx -> startBlackjack(ctx))))
-				.then(ClientCommandManager.literal("hit").executes(ctx -> bjHit()))
-				.then(ClientCommandManager.literal("stand").executes(ctx -> bjStand())));
+		betButton = button(x, y, w, "", () -> {
+			betIndex = (betIndex + 1) % BETS.length;
 		});
+		y += rowH;
+
+		button(x, y, half, "Slots", () -> FunGambleClient.uiSlots(bet()));
+		button(x2, y, half, "Würfeln", () -> FunGambleClient.uiDice(bet()));
+		y += rowH;
+
+		button(x, y, half, "Münze: Kopf", () -> FunGambleClient.uiCoin(bet(), true));
+		button(x2, y, half, "Münze: Zahl", () -> FunGambleClient.uiCoin(bet(), false));
+		y += rowH;
+
+		button(x, y, half, "Roulette: Rot", () -> FunGambleClient.uiRoulette(bet(), "rot"));
+		button(x2, y, half, "Roulette: Schwarz", () -> FunGambleClient.uiRoulette(bet(), "schwarz"));
+		y += rowH;
+
+		button(x, y, half, "Roulette: Grün", () -> FunGambleClient.uiRoulette(bet(), "gruen"));
+		button(x2, y, half, "Glücksrad", () -> FunGambleClient.uiWheel(bet()));
+		y += rowH;
+
+		button(x, y, half, "Hoch", () -> FunGambleClient.uiHighLow(bet(), true));
+		button(x2, y, half, "Tief", () -> FunGambleClient.uiHighLow(bet(), false));
+		y += rowH;
+
+		button(x, y, half, "Crash starten", () -> FunGambleClient.uiCrash(bet()));
+		button(x2, y, half, "Cashout!", FunGambleClient::uiCashout);
+		y += rowH;
+
+		button(x, y, half, "Blackjack starten", () -> FunGambleClient.uiBlackjack(bet()));
+		button(x2, y, half, "Karte ziehen (Hit)", FunGambleClient::uiHit);
+		y += rowH;
+
+		button(x, y, half, "Bleiben (Stand)", FunGambleClient::uiStand);
+		button(x2, y, half, "Shop", () -> MinecraftClient.getInstance().setScreen(new ShopScreen()));
+		y += rowH;
+
+		button(x, y, w, "Schließen", this::close);
+
+		refresh();
 	}
 
-	// Einsatz-Argument: /gamble <spiel> <einsatz> ...
-	private static RequiredArgumentBuilder<FabricClientCommandSource, Long> bet() {
-		return ClientCommandManager.argument("einsatz", LongArgumentType.longArg(1));
-	}
-
-	// ---------- Hilfsfunktionen ----------
-
-	private static void chat(Text text) {
-		MinecraftClient mc = MinecraftClient.getInstance();
-		if (mc.player != null) {
-			mc.player.sendMessage(text, false); // nur lokal sichtbar
-		}
-	}
-
-	private static void chat(String text, Formatting color) {
-		chat(Text.literal(text).formatted(color));
-	}
-
-	private static void overlay(Text text) {
-		MinecraftClient mc = MinecraftClient.getInstance();
-		if (mc.inGameHud != null) {
-			mc.inGameHud.setOverlayMessage(text, false);
-		}
-	}
-
-	private static void sound(SoundEvent event, float pitch) {
-		MinecraftClient mc = MinecraftClient.getInstance();
-		if (mc.getSoundManager() != null) {
-			mc.getSoundManager().play(PositionedSoundInstance.master(event, pitch, 1.0f));
-		}
-	}
-
-	private static String fmt(double d) {
-		return String.format(Locale.ROOT, "%.2f", d);
-	}
-
-	private static boolean isBusy() {
-		return running != null || crashActive || bjActive;
-	}
-
-	private static Text reel(int s) {
-		return Text.literal(SYMBOLS[s]).formatted(SYMBOL_COLORS[s]);
-	}
-
-	private static Text reels(int a, int b, int c) {
-		return Text.literal("[ ")
-			.append(reel(a)).append(" | ")
-			.append(reel(b)).append(" | ")
-			.append(reel(c)).append(" ]");
-	}
-
-	private static Formatting rouletteFormat(int n) {
-		if (n == 0) return Formatting.GREEN;
-		return RED.contains(n) ? Formatting.RED : Formatting.GRAY;
-	}
-
-	private static String rouletteColor(int n) {
-		if (n == 0) return "gruen";
-		return RED.contains(n) ? "rot" : "schwarz";
-	}
-
-	private static String cardName(int c) {
-		return switch (c) {
-			case 1 -> "Ass";
-			case 11 -> "Bube";
-			case 12 -> "Dame";
-			case 13 -> "König";
-			default -> String.valueOf(c);
-		};
-	}
-
-	// ---------- Spiele mit Animation ----------
-
-	private static Game coinflip(boolean guessHeads) {
-		final boolean heads = RNG.nextBoolean();
-		final Text result = Text.literal("Münze: " + (heads ? "Kopf" : "Zahl")).formatted(Formatting.YELLOW);
-		final double mult = heads == guessHeads ? 2.0 : 0.0;
-
-		IntConsumer tick = t -> {
-			if (t % 4 == 0) {
-				boolean showHeads = (t / 4) % 2 == 0;
-				overlay(Text.literal("Münze dreht sich... " + (showHeads ? "Kopf" : "Zahl")).formatted(Formatting.GOLD));
-				sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.0f + (t / 40.0f));
-			}
-		};
-		return new Game(mult, result, 40, tick);
-	}
-
-	private static double slotsMultiplier(int a, int b, int c) {
-		if (a == b && b == c) {
-			return (a == SYMBOLS.length - 1) ? 25.0 : 10.0; // 7-7-7 = Jackpot
-		} else if (a == b || b == c || a == c) {
-			return 1.5;
-		}
-		return 0.0;
-	}
-
-	private static Game slots() {
-		final int a = RNG.nextInt(SYMBOLS.length);
-		final int b = RNG.nextInt(SYMBOLS.length);
-		final int c = RNG.nextInt(SYMBOLS.length);
-		final int stop1 = 20, stop2 = 35, stop3 = 50;
-
-		IntConsumer tick = t -> {
-			boolean stopping = (t == stop1 || t == stop2 || t == stop3);
-			if (t % 2 == 0 || stopping) {
-				int r1 = t >= stop1 ? a : RNG.nextInt(SYMBOLS.length);
-				int r2 = t >= stop2 ? b : RNG.nextInt(SYMBOLS.length);
-				int r3 = t >= stop3 ? c : RNG.nextInt(SYMBOLS.length);
-				overlay(reels(r1, r2, r3));
-			}
-			if (t == stop1) {
-				sound(SoundEvents.BLOCK_LEVER_CLICK, 0.8f);
-			} else if (t == stop2) {
-				sound(SoundEvents.BLOCK_LEVER_CLICK, 1.0f);
-			} else if (t == stop3) {
-				sound(SoundEvents.BLOCK_LEVER_CLICK, 1.3f);
-			} else if (t % 2 == 0 && t < stop3) {
-				sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.6f);
-			}
-		};
-		return new Game(slotsMultiplier(a, b, c), reels(a, b, c), stop3, tick);
-	}
-
-	// Du und der Dealer wuerfeln je einen W6. Hoeher gewinnt, Gleichstand = Einsatz zurueck.
-	private static Game dice() {
-		final int you = RNG.nextInt(6) + 1;
-		final int dealer = RNG.nextInt(6) + 1;
-		final double mult = you > dealer ? 2.0 : (you == dealer ? 1.0 : 0.0);
-		final Text result = Text.literal("Du: " + you + "  |  Dealer: " + dealer).formatted(Formatting.WHITE);
-
-		IntConsumer tick = t -> {
-			if (t % 2 == 0 || t == 20) {
-				String youStr = t >= 20 ? String.valueOf(you) : String.valueOf(RNG.nextInt(6) + 1);
-				String dealerStr = t >= 40 ? String.valueOf(dealer) : (t >= 20 ? String.valueOf(RNG.nextInt(6) + 1) : "?");
-				overlay(Text.literal("Du: " + youStr + "  |  Dealer: " + dealerStr).formatted(Formatting.WHITE));
-			}
-			if (t == 20 || t == 40) {
-				sound(SoundEvents.BLOCK_LEVER_CLICK, 1.2f);
-			} else if (t % 2 == 0) {
-				sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.4f);
-			}
-		};
-		return new Game(mult, result, 40, tick);
-	}
-
-	private static Game roulette(String pick) {
-		final int n = RNG.nextInt(37); // 0-36
-		final String color = rouletteColor(n);
-		final Text result = Text.literal("Kugel landet auf " + n + " (" + color + ")").formatted(rouletteFormat(n));
-		double m = 0.0;
-		if (pick.equals(color)) {
-			m = color.equals("gruen") ? 14.0 : 2.0;
-		}
-		final double mult = m;
-
-		IntConsumer tick = t -> {
-			// Das Rad wird langsamer: erst alle 2 Ticks, dann 3, dann 5
-			boolean show = (t < 30 && t % 2 == 0) || (t >= 30 && t < 45 && t % 3 == 0) || (t >= 45 && t % 5 == 0);
-			if (show) {
-				int shown = (t >= 55) ? n : RNG.nextInt(37);
-				overlay(Text.literal("Rad dreht sich... " + shown).formatted(rouletteFormat(shown)));
-				sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.8f - (t / 60.0f));
-			}
-		};
-		return new Game(mult, result, 60, tick);
-	}
-
-	// Gluecksrad: 12 Felder, der Zeiger wird immer langsamer
-	private static String wheelLabel(double m) {
-		if (m == 0) return "Niete";
-		return m == Math.floor(m) ? "x" + (int) m : "x" + m;
-	}
-
-	private static Game wheel() {
-		final int target = RNG.nextInt(WHEEL.length);
-		final int n = WHEEL.length * 2 + target; // zwei volle Runden + Weg bis zum Ziel
-		final int duration = 70;
-		final int[] times = new int[n];
-		for (int k = 1; k <= n; k++) {
-			times[k - 1] = (int) Math.round(duration * Math.pow((double) k / n, 1.6));
-		}
-		final double mult = WHEEL[target];
-		final Text result = Text.literal("Glücksrad: " + wheelLabel(mult)).formatted(Formatting.GOLD);
-
-		IntConsumer tick = t -> {
-			int advanced = 0;
-			boolean moved = false;
-			for (int ti : times) {
-				if (ti <= t) advanced++;
-				if (ti == t) moved = true;
-			}
-			if (moved || t == 1) {
-				double shown = WHEEL[advanced % WHEEL.length];
-				overlay(Text.literal("Glücksrad: " + wheelLabel(shown)).formatted(Formatting.GOLD));
-			}
-			if (moved) {
-				sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.2f + (t / 140.0f));
-			}
-		};
-		return new Game(mult, result, duration, tick);
-	}
-
-	// Hoch/Tief: Wird die zweite Karte hoeher oder niedriger? Gleichstand verliert.
-	private static Game highLow(boolean high) {
-		final int c1 = RNG.nextInt(13) + 1;
-		final int c2 = RNG.nextInt(13) + 1;
-		final boolean win = high ? c2 > c1 : c2 < c1;
-		final Text result = Text.literal("Karte 1: " + cardName(c1) + "  |  Karte 2: " + cardName(c2)).formatted(Formatting.WHITE);
-
-		IntConsumer tick = t -> {
-			if (t % 3 == 0 && t < 30) {
-				overlay(Text.literal("Karte 1: " + cardName(c1) + "  |  Karte 2: " + cardName(RNG.nextInt(13) + 1)).formatted(Formatting.WHITE));
-				sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.0f + (t / 60.0f));
-			}
-		};
-		return new Game(win ? 2.0 : 0.0, result, 30, tick);
-	}
-
-	// ---------- Crash ----------
-
-	private static double crashMult(int ticks) {
-		return Math.pow(1.012, ticks);
-	}
-
-	private static int startCrash(CommandContext<FabricClientCommandSource> ctx) {
-		if (isBusy()) {
-			chat("Beende erst deine laufende Runde!", Formatting.YELLOW);
-			return 0;
-		}
-		long bet = LongArgumentType.getLong(ctx, "einsatz");
-		if (bet > balance) {
-			chat("Nicht genug Spielgeld! Du hast nur " + balance + ".", Formatting.RED);
-			return 0;
-		}
-		balance -= bet;
-		save();
-		crashBet = bet;
-		crashTicks = 0;
-		crashPoint = Math.min(200.0, Math.max(1.0, 0.96 / (1.0 - RNG.nextDouble())));
-		crashActive = true;
-		chat("Crash gestartet! Zahle mit /gamble cashout aus, bevor es crasht.", Formatting.AQUA);
-		return 1;
-	}
-
-	private static void tickCrash() {
-		crashTicks++;
-		double m = crashMult(crashTicks);
-		if (m >= crashPoint) {
-			crashActive = false;
-			overlay(Text.literal("CRASH bei x" + fmt(crashPoint)).formatted(Formatting.RED));
-			chat("CRASH bei x" + fmt(crashPoint) + "!", Formatting.RED);
-			payoutAndReport(crashBet, 0.0);
+	private void refresh() {
+		if (balanceLabel == null) {
 			return;
 		}
-		if (crashTicks % 2 == 0) {
-			overlay(Text.literal("Multiplikator: x" + fmt(m) + "   (/gamble cashout)").formatted(Formatting.GREEN));
-		}
-		if (crashTicks % 10 == 0) {
-			sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.0f + (float) Math.min(1.0, m / 10.0));
-		}
+		balanceLabel.setMessage(FunGambleClient.balanceLabel());
+		status1.setMessage(FunGambleClient.statusLine1());
+		status2.setMessage(FunGambleClient.statusLine2());
+		betButton.setMessage(betText());
 	}
 
-	private static int cashout() {
-		if (!crashActive) {
-			chat("Keine laufende Crash-Runde. Starte mit /gamble crash <einsatz>.", Formatting.YELLOW);
-			return 0;
-		}
-		double m = crashMult(crashTicks);
-		crashActive = false;
-		overlay(Text.literal("Ausgezahlt bei x" + fmt(m)).formatted(Formatting.GREEN));
-		chat("Ausgezahlt bei x" + fmt(m) + " (Crash wäre bei x" + fmt(crashPoint) + " gewesen)", Formatting.AQUA);
-		payoutAndReport(crashBet, m);
-		return 1;
+	@Override
+	public void tick() {
+		refresh();
 	}
 
-	// ---------- Blackjack ----------
+	@Override
+	public boolean shouldPause() {
+		return false;
+	}
+}
 
-	private static int draw() {
-		return RNG.nextInt(13) + 1;
+/** Der Spielgeld-Shop als Fenster. */
+class ShopScreen extends Screen {
+
+	private final List<ButtonWidget> itemButtons = new ArrayList<>();
+	private ButtonWidget balanceLabel;
+	private ButtonWidget status;
+
+	ShopScreen() {
+		super(Text.literal("Spielgeld-Shop"));
 	}
 
-	private static int total(List<Integer> cards) {
-		int sum = 0;
-		int aces = 0;
-		for (int c : cards) {
-			if (c == 1) {
-				aces++;
-				sum += 11;
-			} else {
-				sum += Math.min(c, 10);
-			}
+	@Override
+	protected void init() {
+		itemButtons.clear();
+		final int w = 260;
+		final int rowH = 20;
+		final int x = (this.width - w) / 2;
+		int rows = FunGambleClient.ITEMS.size() + 4;
+		int y = Math.max(4, (this.height - rows * rowH) / 2);
+
+		balanceLabel = ButtonWidget.builder(Text.empty(), btn -> {}).dimensions(x, y, w, 18).build();
+		balanceLabel.active = false;
+		this.addDrawableChild(balanceLabel);
+		y += rowH;
+
+		status = ButtonWidget.builder(Text.empty(), btn -> {}).dimensions(x, y, w, 18).build();
+		status.active = false;
+		this.addDrawableChild(status);
+		y += rowH;
+
+		for (FunGambleClient.Item item : FunGambleClient.ITEMS) {
+			ButtonWidget b = ButtonWidget.builder(Text.literal(item.name()), btn -> FunGambleClient.shopClick(item))
+				.dimensions(x, y, w, 18).build();
+			this.addDrawableChild(b);
+			itemButtons.add(b);
+			y += rowH;
 		}
-		while (sum > 21 && aces > 0) {
-			sum -= 10;
-			aces--;
-		}
-		return sum;
+
+		y += 4;
+		this.addDrawableChild(ButtonWidget.builder(Text.literal("Zurück zum Casino"),
+			btn -> MinecraftClient.getInstance().setScreen(new GambleScreen())).dimensions(x, y, w, 18).build());
+
+		refresh();
 	}
 
-	private static String handText(List<Integer> cards) {
-		StringBuilder sb = new StringBuilder();
-		for (int i = 0; i < cards.size(); i++) {
-			if (i > 0) sb.append(", ");
-			sb.append(cardName(cards.get(i)));
-		}
-		return sb + " (" + total(cards) + ")";
-	}
-
-	private static int startBlackjack(CommandContext<FabricClientCommandSource> ctx) {
-		if (isBusy()) {
-			chat("Beende erst deine laufende Runde!", Formatting.YELLOW);
-			return 0;
-		}
-		long bet = LongArgumentType.getLong(ctx, "einsatz");
-		if (bet > balance) {
-			chat("Nicht genug Spielgeld! Du hast nur " + balance + ".", Formatting.RED);
-			return 0;
-		}
-		balance -= bet;
-		save();
-		bjBet = bet;
-		bjPlayer.clear();
-		bjDealer.clear();
-		bjPlayer.add(draw());
-		bjDealer.add(draw());
-		bjPlayer.add(draw());
-		bjDealer.add(draw());
-		bjActive = true;
-		sound(SoundEvents.BLOCK_LEVER_CLICK, 1.2f);
-
-		chat("Blackjack – deine Karten: " + handText(bjPlayer), Formatting.WHITE);
-		chat("Dealer zeigt: " + cardName(bjDealer.get(0)) + ", ?", Formatting.GRAY);
-
-		if (total(bjPlayer) == 21) {
-			chat("Blackjack!", Formatting.GOLD);
-			chat("Dealer: " + handText(bjDealer), Formatting.GRAY);
-			bjActive = false;
-			payoutAndReport(bjBet, total(bjDealer) == 21 ? 1.0 : 2.5);
-		} else {
-			chat("/gamble hit = Karte ziehen, /gamble stand = bleiben", Formatting.AQUA);
-		}
-		return 1;
-	}
-
-	private static int bjHit() {
-		if (!bjActive) {
-			chat("Keine laufende Blackjack-Runde. Starte mit /gamble blackjack <einsatz>.", Formatting.YELLOW);
-			return 0;
-		}
-		bjPlayer.add(draw());
-		sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.3f);
-		chat("Du ziehst: " + cardName(bjPlayer.get(bjPlayer.size() - 1)) + " → " + handText(bjPlayer), Formatting.WHITE);
-
-		int t = total(bjPlayer);
-		if (t > 21) {
-			bjActive = false;
-			chat("Überkauft!", Formatting.RED);
-			payoutAndReport(bjBet, 0.0);
-		} else if (t == 21) {
-			dealerPlay();
-		} else {
-			chat("/gamble hit oder /gamble stand", Formatting.AQUA);
-		}
-		return 1;
-	}
-
-	private static int bjStand() {
-		if (!bjActive) {
-			chat("Keine laufende Blackjack-Runde. Starte mit /gamble blackjack <einsatz>.", Formatting.YELLOW);
-			return 0;
-		}
-		dealerPlay();
-		return 1;
-	}
-
-	private static void dealerPlay() {
-		while (total(bjDealer) < 17) {
-			bjDealer.add(draw());
-		}
-		int p = total(bjPlayer);
-		int d = total(bjDealer);
-		chat("Dealer: " + handText(bjDealer), Formatting.GRAY);
-
-		double mult;
-		if (d > 21 || p > d) {
-			mult = 2.0;
-		} else if (p == d) {
-			mult = 1.0;
-		} else {
-			mult = 0.0;
-		}
-		bjActive = false;
-		payoutAndReport(bjBet, mult);
-	}
-
-	// ---------- Ablauf ----------
-
-	private static int play(CommandContext<FabricClientCommandSource> ctx, Supplier<Game> gameSupplier) {
-		if (isBusy()) {
-			chat("Beende erst deine laufende Runde!", Formatting.YELLOW);
-			return 0;
-		}
-		long bet = LongArgumentType.getLong(ctx, "einsatz");
-		if (bet > balance) {
-			chat("Nicht genug Spielgeld! Du hast nur " + balance + ".", Formatting.RED);
-			return 0;
-		}
-
-		balance -= bet;
-		save();
-		runningBet = bet;
-		runningTick = 0;
-		running = gameSupplier.get();
-		return 1;
-	}
-
-	private static void tickAll() {
-		if (crashActive) {
-			tickCrash();
-		}
-		tickAnimation();
-	}
-
-	private static void tickAnimation() {
-		if (running == null) {
+	private void refresh() {
+		if (balanceLabel == null) {
 			return;
 		}
-		runningTick++;
-		if (runningTick <= running.duration()) {
-			running.tick().accept(runningTick);
-		}
-		if (runningTick >= running.duration()) {
-			finishRound();
+		balanceLabel.setMessage(FunGambleClient.balanceLabel());
+		status.setMessage(FunGambleClient.statusLine1());
+		for (int i = 0; i < itemButtons.size(); i++) {
+			itemButtons.get(i).setMessage(FunGambleClient.shopLabel(FunGambleClient.ITEMS.get(i)));
 		}
 	}
 
-	private static void finishRound() {
-		Game game = running;
-		long bet = runningBet;
-		running = null;
-
-		overlay(game.result());
-		chat(game.result());
-		payoutAndReport(bet, game.multiplier());
+	@Override
+	public void tick() {
+		refresh();
 	}
 
-	/** Zahlt aus, meldet Gewinn/Verlust und spielt den passenden Sound. */
-	private static void payoutAndReport(long bet, double multiplier) {
-		long payout = Math.round(bet * multiplier);
-		balance += payout;
-		save();
-
-		if (payout > bet) {
-			chat("Gewonnen! +" + (payout - bet) + " Spielgeld", Formatting.GREEN);
-			if (multiplier >= 10.0) {
-				sound(SoundEvents.ENTITY_PLAYER_LEVELUP, 1.0f);
-			} else {
-				sound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 1.0f);
-			}
-		} else if (payout == bet) {
-			chat("Unentschieden – Einsatz zurück.", Formatting.YELLOW);
-			sound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 0.7f);
-		} else {
-			chat("Verloren! -" + (bet - payout) + " Spielgeld", Formatting.RED);
-			sound(SoundEvents.ENTITY_VILLAGER_NO, 1.0f);
-		}
-		chat("Kontostand: " + balance, Formatting.GOLD);
-
-		if (balance <= 0) {
-			chat("Pleite! Mit /gamble reset startest du neu.", Formatting.DARK_RED);
-		}
-	}
-
-	private static int help() {
-		chat("=== Fun Gamble (nur für dich sichtbar) ===", Formatting.GOLD);
-		chat("/gamble balance", Formatting.WHITE);
-		chat("/gamble coinflip <einsatz> <kopf|zahl>", Formatting.WHITE);
-		chat("/gamble slots <einsatz>", Formatting.WHITE);
-		chat("/gamble dice <einsatz>", Formatting.WHITE);
-		chat("/gamble roulette <einsatz> <rot|schwarz|gruen>", Formatting.WHITE);
-		chat("/gamble wheel <einsatz>", Formatting.WHITE);
-		chat("/gamble highlow <einsatz> <hoch|tief>", Formatting.WHITE);
-		chat("/gamble crash <einsatz>  →  /gamble cashout", Formatting.WHITE);
-		chat("/gamble blackjack <einsatz>  →  /gamble hit | stand", Formatting.WHITE);
-		chat("/gamble reset", Formatting.WHITE);
-		return 1;
-	}
-
-	private static int showBalance() {
-		chat("Kontostand: " + balance + " Spielgeld", Formatting.GOLD);
-		return 1;
-	}
-
-	private static int reset() {
-		if (isBusy()) {
-			chat("Beende erst deine laufende Runde!", Formatting.YELLOW);
-			return 0;
-		}
-		balance = START_MONEY;
-		save();
-		chat("Zurückgesetzt auf " + START_MONEY + " Spielgeld.", Formatting.YELLOW);
-		return 1;
-	}
-
-	// ---------- Speichern ----------
-
-	private static void load() {
-		try {
-			if (Files.exists(saveFile)) {
-				balance = Long.parseLong(Files.readString(saveFile).trim());
-			}
-		} catch (Exception e) {
-			balance = START_MONEY;
-		}
-	}
-
-	private static void save() {
-		try {
-			Files.writeString(saveFile, Long.toString(balance));
-		} catch (Exception ignored) {
-		}
+	@Override
+	public boolean shouldPause() {
+		return false;
 	}
 }
