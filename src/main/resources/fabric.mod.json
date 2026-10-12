@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "fungamble",
+  "version": "${version}",
+  "name": "Fun Gamble",
+  "description": "Gamble mit Spielgeld - nur für dich sichtbar (reine Client-Mod).",
+  "authors": ["Du"],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["de.fungamble.FunGambleClient"]
+  },
+  "depends": {
+    "fabricloader": ">=0.18.1",
+    "minecraft": "~1.21.11",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}
