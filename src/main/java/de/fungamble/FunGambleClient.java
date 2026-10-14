@@ -21,6 +21,7 @@ import java.io.StringReader;
 import java.io.StringWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -36,7 +37,7 @@ import java.util.function.Supplier;
  * Der Server (und andere Spieler) bekommen davon nichts mit.
  * Spielgeld ist nicht echt und hat nichts mit Items im Spiel zu tun.
  *
- * Version 1.4: alle Spiele + Spielgeld-Shop + Casino-Menue (/gamble oder /gamble menu).
+ * Version 1.5: alle Spiele + Mini-Games (Plinko, Rubbellos, Schere-Stein-Papier, Reaktion, Tower, Mines) + Shop + Menues.
  */
 public class FunGambleClient implements ClientModInitializer {
 
@@ -87,6 +88,36 @@ public class FunGambleClient implements ClientModInitializer {
 	static String activeTitle = "";
 	static String activeSound = "";
 	static int rings = 0;
+
+	// Plinko / Rubbellos
+	private static final double[] PLINKO = {10, 3, 1.4, 0.7, 0.3, 0.7, 1.4, 3, 10};
+	private static final String[] RPS = {"Stein", "Schere", "Papier"};
+
+	// Reaktionstest (0 = aus, 1 = warten, 2 = jetzt!)
+	private static int reflexState = 0;
+	private static long reflexBet = 0;
+	private static int reflexWait = 0;
+	private static int reflexGo = 0;
+
+	// Tower
+	private static boolean towerActive = false;
+	private static long towerBet = 0;
+	private static int towerLevel = 0;
+	private static final int TOWER_MAX = 10;
+	private static final int[] towerBomb = new int[TOWER_MAX];
+
+	// Mines
+	private static final int MINES = 3;
+	private static boolean minesActive = false;
+	private static boolean minesDone = false;
+	private static long minesBet = 0;
+	private static int minesSafe = 0;
+	private static final boolean[] minesMine = new boolean[25];
+	private static final boolean[] minesOpen = new boolean[25];
+
+	// Taegliche Belohnung
+	private static String lastDaily = "";
+	private static int dailyStreak = 0;
 
 	// Fuer das Casino-Menue: zuletzt angezeigte Texte
 	private static final java.util.ArrayDeque<Text> recent = new java.util.ArrayDeque<>();
@@ -150,6 +181,29 @@ public class FunGambleClient implements ClientModInitializer {
 				.then(ClientCommandManager.literal("title").executes(ctx -> unequip("title")))
 				.then(ClientCommandManager.literal("sound").executes(ctx -> unequip("sound"))));
 
+			// Mini-Games
+			root.then(ClientCommandManager.literal("rps").then(bet()
+				.then(ClientCommandManager.literal("stein").executes(ctx -> play(ctx, () -> rps(0))))
+				.then(ClientCommandManager.literal("schere").executes(ctx -> play(ctx, () -> rps(1))))
+				.then(ClientCommandManager.literal("papier").executes(ctx -> play(ctx, () -> rps(2))))));
+			root.then(ClientCommandManager.literal("plinko").then(bet()
+				.executes(ctx -> play(ctx, FunGambleClient::plinko))));
+			root.then(ClientCommandManager.literal("scratch").then(bet()
+				.executes(ctx -> play(ctx, FunGambleClient::scratch))));
+			root.then(ClientCommandManager.literal("reflex").then(bet()
+				.executes(ctx -> startReflex(LongArgumentType.getLong(ctx, "einsatz")))));
+			root.then(ClientCommandManager.literal("go").executes(ctx -> reflexGoNow()));
+			root.then(ClientCommandManager.literal("tower").then(bet()
+				.executes(ctx -> startTower(LongArgumentType.getLong(ctx, "einsatz")))));
+			root.then(ClientCommandManager.literal("door")
+				.then(ClientCommandManager.literal("1").executes(ctx -> towerDoor(1)))
+				.then(ClientCommandManager.literal("2").executes(ctx -> towerDoor(2)))
+				.then(ClientCommandManager.literal("3").executes(ctx -> towerDoor(3))));
+			root.then(ClientCommandManager.literal("towercash").executes(ctx -> towerCash()));
+			root.then(ClientCommandManager.literal("mines").executes(ctx -> openScreen(1)));
+			root.then(ClientCommandManager.literal("minigames").executes(ctx -> openScreen(0)));
+			root.then(ClientCommandManager.literal("daily").executes(ctx -> daily()));
+
 			dispatcher.register(root);
 		});
 	}
@@ -196,7 +250,7 @@ public class FunGambleClient implements ClientModInitializer {
 	}
 
 	private static boolean isBusy() {
-		return running != null || crashActive || bjActive;
+		return running != null || crashActive || bjActive || reflexState != 0 || towerActive || minesActive;
 	}
 
 	private static Text reel(int s) {
@@ -376,6 +430,373 @@ public class FunGambleClient implements ClientModInitializer {
 			}
 		};
 		return new Game(win ? 2.0 : 0.0, result, 30, tick);
+	}
+
+	// ---------- Mini-Games ----------
+
+	// Schere, Stein, Papier gegen den Computer (0 = Stein, 1 = Schere, 2 = Papier)
+	private static Game rps(int pick) {
+		final int opp = RNG.nextInt(3);
+		final double mult;
+		if (opp == pick) {
+			mult = 1.0;
+		} else if ((opp - pick + 3) % 3 == 1) {
+			mult = 1.9;
+		} else {
+			mult = 0.0;
+		}
+		final Text result = Text.literal("Du: " + RPS[pick] + "  |  Gegner: " + RPS[opp]).formatted(Formatting.WHITE);
+
+		IntConsumer tick = t -> {
+			if (t % 3 == 0 && t < 30) {
+				overlay(Text.literal("Du: " + RPS[pick] + "  |  Gegner: " + RPS[RNG.nextInt(3)] + " ...").formatted(Formatting.WHITE));
+				sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.0f + (t / 60.0f));
+			}
+		};
+		return new Game(mult, result, 30, tick);
+	}
+
+	// Plinko: Eine Kugel faellt durch 8 Reihen und landet in einem Fach
+	private static Game plinko() {
+		final int rows = 8;
+		final boolean[] right = new boolean[rows];
+		int p = 0;
+		for (int i = 0; i < rows; i++) {
+			right[i] = RNG.nextBoolean();
+			if (right[i]) p++;
+		}
+		final double mult = PLINKO[p];
+
+		StringBuilder full = new StringBuilder();
+		for (int i = 0; i < rows; i++) {
+			full.append(right[i] ? ">" : "<");
+		}
+		final Text result = Text.literal("Plinko: Fach " + wheelLabel(mult) + "  (" + full + ")").formatted(Formatting.GOLD);
+
+		IntConsumer tick = t -> {
+			if (t % 6 == 0) {
+				int step = Math.min(rows, t / 6);
+				StringBuilder sb = new StringBuilder();
+				for (int i = 0; i < step; i++) {
+					sb.append(right[i] ? ">" : "<").append(' ');
+				}
+				overlay(Text.literal("Plinko: " + sb + "(Reihe " + step + "/" + rows + ")").formatted(Formatting.GOLD));
+				sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.0f + 0.07f * step);
+			}
+		};
+		return new Game(mult, result, rows * 6 + 6, tick);
+	}
+
+	// Rubbellos: 6 Felder, drei oder mehr gleiche Symbole gewinnen
+	private static double scratchMultiplier(int best) {
+		return switch (best) {
+			case 3 -> 1.9;
+			case 4 -> 5.0;
+			case 5 -> 25.0;
+			case 6 -> 100.0;
+			default -> 0.0;
+		};
+	}
+
+	private static Text scratchText(int[] fields, int revealed) {
+		var t = Text.literal("Rubbellos: [ ");
+		for (int i = 0; i < fields.length; i++) {
+			if (i > 0) t.append(" | ");
+			if (i < revealed) {
+				t.append(reel(fields[i]));
+			} else {
+				t.append(Text.literal("?").formatted(Formatting.GRAY));
+			}
+		}
+		t.append(" ]");
+		return t;
+	}
+
+	private static Game scratch() {
+		final int[] fields = new int[6];
+		final int[] counts = new int[SYMBOLS.length];
+		int best = 0;
+		for (int i = 0; i < fields.length; i++) {
+			fields[i] = RNG.nextInt(SYMBOLS.length);
+			counts[fields[i]]++;
+			best = Math.max(best, counts[fields[i]]);
+		}
+		final double mult = scratchMultiplier(best);
+
+		IntConsumer tick = t -> {
+			if (t % 8 == 0) {
+				int revealed = Math.min(fields.length, t / 8);
+				overlay(scratchText(fields, revealed));
+				sound(SoundEvents.BLOCK_LEVER_CLICK, 0.9f + 0.05f * revealed);
+			}
+		};
+		return new Game(mult, scratchText(fields, fields.length), fields.length * 8 + 4, tick);
+	}
+
+	// Reaktionstest: Warte auf JETZT und druecke dann so schnell wie moeglich
+	static int startReflex(long bet) {
+		if (isBusy()) {
+			chat("Beende erst deine laufende Runde!", Formatting.YELLOW);
+			return 0;
+		}
+		if (bet > balance) {
+			chat("Nicht genug Spielgeld! Du hast nur " + balance + ".", Formatting.RED);
+			return 0;
+		}
+		balance -= bet;
+		save();
+		reflexBet = bet;
+		reflexState = 1;
+		reflexWait = 30 + RNG.nextInt(60);
+		reflexGo = 0;
+		overlay(Text.literal("Warte...").formatted(Formatting.YELLOW));
+		chat("Reaktionstest! Drücke erst bei JETZT! (Menü: Button \"JETZT!\" oder /gamble go). Zu früh = verloren.", Formatting.AQUA);
+		return 1;
+	}
+
+	private static void tickReflex() {
+		if (reflexState == 1) {
+			reflexWait--;
+			if (reflexWait <= 0) {
+				reflexState = 2;
+				reflexGo = 0;
+				overlay(Text.literal("JETZT!").formatted(Formatting.GREEN));
+				sound(SoundEvents.BLOCK_LEVER_CLICK, 1.6f);
+			}
+		} else if (reflexState == 2) {
+			reflexGo++;
+			if (reflexGo > 40) {
+				reflexState = 0;
+				overlay(Text.literal("Zu langsam!").formatted(Formatting.RED));
+				chat("Zu langsam!", Formatting.RED);
+				payoutAndReport(reflexBet, 0.0);
+			}
+		}
+	}
+
+	private static int reflexGoNow() {
+		if (reflexState == 0) {
+			chat("Kein Reaktionstest aktiv. Starte einen im Menü oder mit /gamble reflex <einsatz>.", Formatting.YELLOW);
+			return 0;
+		}
+		if (reflexState == 1) {
+			reflexState = 0;
+			overlay(Text.literal("Zu früh!").formatted(Formatting.RED));
+			chat("Zu früh!", Formatting.RED);
+			payoutAndReport(reflexBet, 0.0);
+			return 1;
+		}
+		int ms = reflexGo * 50;
+		double mult;
+		if (reflexGo <= 5) {
+			mult = 3.0;
+		} else if (reflexGo <= 8) {
+			mult = 2.0;
+		} else if (reflexGo <= 12) {
+			mult = 1.0;
+		} else if (reflexGo <= 20) {
+			mult = 0.5;
+		} else {
+			mult = 0.0;
+		}
+		reflexState = 0;
+		overlay(Text.literal("Reaktionszeit: ca. " + ms + " ms").formatted(Formatting.GREEN));
+		chat("Reaktionszeit: ca. " + ms + " ms", Formatting.AQUA);
+		payoutAndReport(reflexBet, mult);
+		return 1;
+	}
+
+	// Tower: Pro Stufe drei Tueren, hinter einer ist eine Falle
+	private static double towerMult(int level) {
+		return Math.pow(1.4, level);
+	}
+
+	static int startTower(long bet) {
+		if (isBusy()) {
+			chat("Beende erst deine laufende Runde!", Formatting.YELLOW);
+			return 0;
+		}
+		if (bet > balance) {
+			chat("Nicht genug Spielgeld! Du hast nur " + balance + ".", Formatting.RED);
+			return 0;
+		}
+		balance -= bet;
+		save();
+		towerBet = bet;
+		towerLevel = 0;
+		for (int i = 0; i < TOWER_MAX; i++) {
+			towerBomb[i] = RNG.nextInt(3);
+		}
+		towerActive = true;
+		chat("Tower gestartet! Wähle Tür 1, 2 oder 3 (/gamble door <1|2|3>). Hinter einer Tür ist eine Falle.", Formatting.AQUA);
+		return 1;
+	}
+
+	static int towerDoor(int door) {
+		if (!towerActive) {
+			chat("Kein laufender Tower. Starte mit /gamble tower <einsatz>.", Formatting.YELLOW);
+			return 0;
+		}
+		if (towerBomb[towerLevel] == door - 1) {
+			towerActive = false;
+			chat("BOOM! Hinter Tür " + door + " war die Falle.", Formatting.RED);
+			payoutAndReport(towerBet, 0.0);
+			return 1;
+		}
+		towerLevel++;
+		sound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 0.8f + 0.05f * towerLevel);
+		double m = towerMult(towerLevel);
+		if (towerLevel >= TOWER_MAX) {
+			towerActive = false;
+			chat("Die Spitze ist erreicht!", Formatting.GOLD);
+			payoutAndReport(towerBet, m);
+		} else {
+			chat("Sicher! Stufe " + towerLevel + "/" + TOWER_MAX + " – x" + fmt(m) + "  (nächste Tür oder Cashout)", Formatting.GREEN);
+		}
+		return 1;
+	}
+
+	static int towerCash() {
+		if (!towerActive) {
+			chat("Kein laufender Tower.", Formatting.YELLOW);
+			return 0;
+		}
+		if (towerLevel == 0) {
+			chat("Wähle erst eine Tür!", Formatting.YELLOW);
+			return 0;
+		}
+		towerActive = false;
+		payoutAndReport(towerBet, towerMult(towerLevel));
+		return 1;
+	}
+
+	// Mines: 5x5 Felder, 3 Minen. Jedes sichere Feld erhoeht den Multiplikator.
+	private static double minesMultiplier(int safe) {
+		if (safe <= 0) {
+			return 1.0;
+		}
+		double m = 1.0;
+		for (int i = 0; i < safe; i++) {
+			m *= (25.0 - i) / (25.0 - MINES - i);
+		}
+		return 0.96 * m;
+	}
+
+	static int minesStart(long bet) {
+		if (isBusy()) {
+			chat("Beende erst deine laufende Runde!", Formatting.YELLOW);
+			return 0;
+		}
+		if (bet > balance) {
+			chat("Nicht genug Spielgeld! Du hast nur " + balance + ".", Formatting.RED);
+			return 0;
+		}
+		balance -= bet;
+		save();
+		minesBet = bet;
+		minesSafe = 0;
+		for (int i = 0; i < 25; i++) {
+			minesMine[i] = false;
+			minesOpen[i] = false;
+		}
+		int placed = 0;
+		while (placed < MINES) {
+			int i = RNG.nextInt(25);
+			if (!minesMine[i]) {
+				minesMine[i] = true;
+				placed++;
+			}
+		}
+		minesActive = true;
+		minesDone = false;
+		chat("Mines gestartet: " + MINES + " Minen auf 25 Feldern. Decke Felder auf und zahle rechtzeitig aus!", Formatting.AQUA);
+		return 1;
+	}
+
+	static int minesReveal(int index) {
+		if (!minesActive) {
+			chat("Keine laufende Mines-Runde. Starte eine mit dem Button \"Mines starten\".", Formatting.YELLOW);
+			return 0;
+		}
+		if (minesOpen[index]) {
+			return 0;
+		}
+		minesOpen[index] = true;
+		if (minesMine[index]) {
+			minesActive = false;
+			minesDone = true;
+			chat("BOOM! Das war eine Mine.", Formatting.RED);
+			payoutAndReport(minesBet, 0.0);
+			return 1;
+		}
+		minesSafe++;
+		sound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 0.8f + 0.03f * minesSafe);
+		if (minesSafe >= 25 - MINES) {
+			minesActive = false;
+			minesDone = true;
+			chat("Alle sicheren Felder gefunden!", Formatting.GOLD);
+			payoutAndReport(minesBet, minesMultiplier(minesSafe));
+		} else {
+			chat("Sicher! x" + fmt(minesMultiplier(minesSafe)) + "  – weiter oder Cashout", Formatting.GREEN);
+		}
+		return 1;
+	}
+
+	static int minesCash() {
+		if (!minesActive) {
+			chat("Keine laufende Mines-Runde.", Formatting.YELLOW);
+			return 0;
+		}
+		if (minesSafe == 0) {
+			chat("Decke erst ein Feld auf!", Formatting.YELLOW);
+			return 0;
+		}
+		minesActive = false;
+		minesDone = true;
+		payoutAndReport(minesBet, minesMultiplier(minesSafe));
+		return 1;
+	}
+
+	static Text minesCellLabel(int i) {
+		if (minesOpen[i] && minesMine[i]) {
+			return Text.literal("BOOM").formatted(Formatting.RED);
+		}
+		if (minesOpen[i]) {
+			return Text.literal("Gem").formatted(Formatting.AQUA);
+		}
+		if (minesDone && minesMine[i]) {
+			return Text.literal("Mine").formatted(Formatting.GRAY);
+		}
+		return Text.literal("?");
+	}
+
+	static Text minesCashLabel() {
+		if (minesActive && minesSafe > 0) {
+			return Text.literal("Cashout x" + fmt(minesMultiplier(minesSafe))).formatted(Formatting.GREEN);
+		}
+		return Text.literal("Cashout");
+	}
+
+	// Taegliche Belohnung
+	static int daily() {
+		String today = LocalDate.now().toString();
+		if (today.equals(lastDaily)) {
+			chat("Die heutige Belohnung hast du schon abgeholt. Komm morgen wieder!", Formatting.YELLOW);
+			return 0;
+		}
+		if (LocalDate.now().minusDays(1).toString().equals(lastDaily)) {
+			dailyStreak++;
+		} else {
+			dailyStreak = 1;
+		}
+		lastDaily = today;
+		long reward = 200 + 50L * Math.min(dailyStreak, 10);
+		balance += reward;
+		save();
+		sound(SoundEvents.ENTITY_PLAYER_LEVELUP, 1.0f);
+		chat("Tägliche Belohnung: +" + reward + " Spielgeld (Serie: " + dailyStreak + " Tage)", Formatting.GREEN);
+		chat(balanceText());
+		return 1;
 	}
 
 	// ---------- Crash ----------
@@ -589,6 +1010,9 @@ public class FunGambleClient implements ClientModInitializer {
 		if (crashActive) {
 			tickCrash();
 		}
+		if (reflexState != 0) {
+			tickReflex();
+		}
 		tickAnimation();
 	}
 
@@ -666,6 +1090,7 @@ public class FunGambleClient implements ClientModInitializer {
 		chat("/gamble highlow <einsatz> <hoch|tief>", Formatting.WHITE);
 		chat("/gamble crash <einsatz>  →  /gamble cashout", Formatting.WHITE);
 		chat("/gamble blackjack <einsatz>  →  /gamble hit | stand", Formatting.WHITE);
+		chat("Mini-Games: /gamble rps | plinko | scratch | reflex (go) | tower (door, towercash) | mines | daily", Formatting.WHITE);
 		chat("/gamble shop  →  /gamble buy <item>  |  equip <item>  |  unequip <title|sound>", Formatting.WHITE);
 		chat("/gamble reset", Formatting.WHITE);
 		return 1;
@@ -696,19 +1121,25 @@ public class FunGambleClient implements ClientModInitializer {
 		return 1;
 	}
 
+	private static int openScreen(int which) {
+		MinecraftClient mc = MinecraftClient.getInstance();
+		mc.send(() -> mc.setScreen(which == 1 ? new MinesScreen() : new MiniScreen()));
+		return 1;
+	}
+
 	static long getBalance() {
 		return balance;
 	}
 
 	static Text statusLine1() {
-		if (running != null || crashActive) {
+		if (running != null || crashActive || reflexState != 0) {
 			return lastOverlay;
 		}
 		return recentLine(1);
 	}
 
 	static Text statusLine2() {
-		if (running != null || crashActive) {
+		if (running != null || crashActive || reflexState != 0) {
 			return recentLine(1);
 		}
 		return recentLine(2);
@@ -729,6 +1160,18 @@ public class FunGambleClient implements ClientModInitializer {
 	static void uiHighLow(long bet, boolean high) { startGame(bet, () -> highLow(high)); }
 	static void uiCrash(long bet) { startCrashRound(bet); }
 	static void uiBlackjack(long bet) { startBlackjackRound(bet); }
+	static void uiPlinko(long bet) { startGame(bet, FunGambleClient::plinko); }
+	static void uiScratch(long bet) { startGame(bet, FunGambleClient::scratch); }
+	static void uiRps(long bet, int pick) { startGame(bet, () -> rps(pick)); }
+	static void uiReflex(long bet) { startReflex(bet); }
+	static void uiGo() { reflexGoNow(); }
+	static void uiTower(long bet) { startTower(bet); }
+	static void uiDoor(int door) { towerDoor(door); }
+	static void uiTowerCash() { towerCash(); }
+	static void uiMinesStart(long bet) { minesStart(bet); }
+	static void uiMinesReveal(int index) { minesReveal(index); }
+	static void uiMinesCash() { minesCash(); }
+	static void uiDaily() { daily(); }
 	static void uiCashout() { cashout(); }
 	static void uiHit() { bjHit(); }
 	static void uiStand() { bjStand(); }
@@ -911,6 +1354,8 @@ public class FunGambleClient implements ClientModInitializer {
 			activeTitle = p.getProperty("title", "");
 			activeSound = p.getProperty("sound", "");
 			rings = Integer.parseInt(p.getProperty("rings", "0"));
+			lastDaily = p.getProperty("lastDaily", "");
+			dailyStreak = Integer.parseInt(p.getProperty("streak", "0"));
 		} catch (Exception e) {
 			balance = START_MONEY;
 		}
@@ -924,6 +1369,8 @@ public class FunGambleClient implements ClientModInitializer {
 			p.setProperty("title", activeTitle);
 			p.setProperty("sound", activeSound);
 			p.setProperty("rings", Integer.toString(rings));
+			p.setProperty("lastDaily", lastDaily);
+			p.setProperty("streak", Integer.toString(dailyStreak));
 			StringWriter sw = new StringWriter();
 			p.store(sw, null);
 			Files.writeString(saveFile, sw.toString());
