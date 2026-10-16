@@ -1,5 +1,6 @@
 package de.fungamble;
 
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.LongArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.builder.RequiredArgumentBuilder;
@@ -23,6 +24,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -37,7 +39,7 @@ import java.util.function.Supplier;
  * Der Server (und andere Spieler) bekommen davon nichts mit.
  * Spielgeld ist nicht echt und hat nichts mit Items im Spiel zu tun.
  *
- * Version 1.5: alle Spiele + Mini-Games (Plinko, Rubbellos, Schere-Stein-Papier, Reaktion, Tower, Mines) + Shop + Menues.
+ * Version 2.0: ueber 25 Spiele, eigene Menues (Blackjack, Poker, Mines ...), Shop, Daily.
  */
 public class FunGambleClient implements ClientModInitializer {
 
@@ -115,6 +117,37 @@ public class FunGambleClient implements ClientModInitializer {
 	private static final boolean[] minesMine = new boolean[25];
 	private static final boolean[] minesOpen = new boolean[25];
 
+	// Kartenleiter (Hoch/Tief-Serie)
+	private static boolean ladderActive = false;
+	private static long ladderBet = 0;
+	private static int ladderCard = 0;
+	private static double ladderMult = 1.0;
+
+	// Muenz-Serie
+	private static boolean streakActive = false;
+	private static long streakBet = 0;
+	private static double streakMult = 1.0;
+	private static int streakCount = 0;
+
+	// Video-Poker (0 = aus, 1 = ausgeteilt, 2 = fertig)
+	private static int pokerState = 0;
+	private static long pokerBet = 0;
+	private static final int[] pokerHand = new int[5];
+	private static final boolean[] pokerHold = new boolean[5];
+	private static final List<Integer> pokerDeck = new ArrayList<>();
+	private static final String[] POKER_NAMES = {"Nichts", "Paar (Buben oder besser)", "Zwei Paare", "Drilling", "Straße",
+		"Flush", "Full House", "Vierling", "Straight Flush", "Royal Flush"};
+	private static final int[] POKER_PAY = {0, 1, 2, 3, 4, 6, 9, 25, 50, 250};
+
+	// Wuerfel 100
+	static final int[] DICE100_THRESHOLDS = {10, 25, 50, 75, 90};
+	static int dice100Index = 2;
+
+	// Pferderennen
+	private static final String[] RACE_NAMES = {"Blitz", "Sturm", "Komet", "Fuchs", "Pfeil"};
+	private static final double[] RACE_P = {0.38, 0.27, 0.19, 0.12, 0.04};
+	private static final double[] RACE_ODDS = {2.5, 3.5, 5.0, 7.9, 23.0};
+
 	// Taegliche Belohnung
 	private static String lastDaily = "";
 	private static int dailyStreak = 0;
@@ -136,7 +169,6 @@ public class FunGambleClient implements ClientModInitializer {
 		ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
 			LiteralArgumentBuilder<FabricClientCommandSource> root = ClientCommandManager.literal("gamble")
 				.executes(ctx -> openMenu())
-				.then(ClientCommandManager.literal("menu").executes(ctx -> openMenu()))
 				.then(ClientCommandManager.literal("help").executes(ctx -> help()))
 				.then(ClientCommandManager.literal("balance").executes(ctx -> showBalance()))
 				.then(ClientCommandManager.literal("reset").executes(ctx -> reset()))
@@ -200,9 +232,71 @@ public class FunGambleClient implements ClientModInitializer {
 				.then(ClientCommandManager.literal("2").executes(ctx -> towerDoor(2)))
 				.then(ClientCommandManager.literal("3").executes(ctx -> towerDoor(3))));
 			root.then(ClientCommandManager.literal("towercash").executes(ctx -> towerCash()));
-			root.then(ClientCommandManager.literal("mines").executes(ctx -> openScreen(1)));
-			root.then(ClientCommandManager.literal("minigames").executes(ctx -> openScreen(0)));
+			root.then(ClientCommandManager.literal("mines").executes(ctx -> openScreenByName("mines")));
+			root.then(ClientCommandManager.literal("minigames").executes(ctx -> openScreenByName("sonstiges")));
 			root.then(ClientCommandManager.literal("daily").executes(ctx -> daily()));
+
+			// Menues: /gamble menu <name>
+			LiteralArgumentBuilder<FabricClientCommandSource> menuNode =
+				ClientCommandManager.literal("menu").executes(ctx -> openMenu());
+			for (String n : new String[]{"automaten", "wuerfel", "karten", "risiko", "sonstiges", "rennen",
+				"blackjack", "poker", "mines", "shop"}) {
+				menuNode.then(ClientCommandManager.literal(n).executes(ctx -> openScreenByName(n)));
+			}
+			root.then(menuNode);
+
+			// Weitere Spiele
+			root.then(lit("dice100").then(bet()
+				.then(lit("ueber").then(intArg("schwelle", 2, 98).executes(ctx -> {
+					int th = IntegerArgumentType.getInteger(ctx, "schwelle");
+					return play(ctx, () -> dice100(true, th));
+				})))
+				.then(lit("unter").then(intArg("schwelle", 2, 98).executes(ctx -> {
+					int th = IntegerArgumentType.getInteger(ctx, "schwelle");
+					return play(ctx, () -> dice100(false, th));
+				})))));
+			root.then(lit("lotto").then(bet().then(intArg("zahl", 1, 10).executes(ctx -> {
+				int n = IntegerArgumentType.getInteger(ctx, "zahl");
+				return play(ctx, () -> lotto(n));
+			}))));
+			root.then(lit("baccarat").then(bet()
+				.then(lit("spieler").executes(ctx -> play(ctx, () -> baccarat(0))))
+				.then(lit("bank").executes(ctx -> play(ctx, () -> baccarat(1))))
+				.then(lit("tie").executes(ctx -> play(ctx, () -> baccarat(2))))));
+			root.then(lit("craps").then(bet().executes(ctx -> play(ctx, FunGambleClient::craps))));
+			root.then(lit("cups").then(bet().then(intArg("becher", 1, 3).executes(ctx -> {
+				int n = IntegerArgumentType.getInteger(ctx, "becher");
+				return play(ctx, () -> cups(n - 1));
+			}))));
+			root.then(lit("chests").then(bet().then(intArg("kiste", 1, 4).executes(ctx -> {
+				int n = IntegerArgumentType.getInteger(ctx, "kiste");
+				return play(ctx, () -> chests(n - 1));
+			}))));
+			root.then(lit("race").then(bet().then(intArg("pferd", 1, 5).executes(ctx -> {
+				int n = IntegerArgumentType.getInteger(ctx, "pferd");
+				return play(ctx, () -> race(n - 1));
+			}))));
+			root.then(lit("sicbo").then(bet()
+				.then(lit("gross").executes(ctx -> play(ctx, () -> sicBo(true))))
+				.then(lit("klein").executes(ctx -> play(ctx, () -> sicBo(false))))));
+
+			// Video-Poker
+			root.then(lit("poker").then(bet().executes(ctx -> pokerDeal(LongArgumentType.getLong(ctx, "einsatz")))));
+			root.then(lit("hold").then(intArg("karte", 1, 5).executes(ctx ->
+				pokerToggle(IntegerArgumentType.getInteger(ctx, "karte") - 1))));
+			root.then(lit("draw").executes(ctx -> pokerDraw()));
+
+			// Kartenleiter und Muenz-Serie
+			root.then(lit("ladder").then(bet().executes(ctx -> ladderStart(LongArgumentType.getLong(ctx, "einsatz")))));
+			root.then(lit("up").executes(ctx -> ladderGuess(true)));
+			root.then(lit("down").executes(ctx -> ladderGuess(false)));
+			root.then(lit("laddercash").executes(ctx -> ladderCash()));
+			root.then(lit("streak").then(bet().executes(ctx -> streakStart(LongArgumentType.getLong(ctx, "einsatz")))));
+			root.then(lit("flip").executes(ctx -> streakFlip()));
+			root.then(lit("streakcash").executes(ctx -> streakCash()));
+
+			// Blackjack: Verdoppeln
+			root.then(lit("double").executes(ctx -> bjDouble()));
 
 			dispatcher.register(root);
 		});
@@ -211,6 +305,14 @@ public class FunGambleClient implements ClientModInitializer {
 	// Einsatz-Argument: /gamble <spiel> <einsatz> ...
 	private static RequiredArgumentBuilder<FabricClientCommandSource, Long> bet() {
 		return ClientCommandManager.argument("einsatz", LongArgumentType.longArg(1));
+	}
+
+	private static LiteralArgumentBuilder<FabricClientCommandSource> lit(String name) {
+		return ClientCommandManager.literal(name);
+	}
+
+	private static RequiredArgumentBuilder<FabricClientCommandSource, Integer> intArg(String name, int min, int max) {
+		return ClientCommandManager.argument(name, IntegerArgumentType.integer(min, max));
 	}
 
 	// ---------- Hilfsfunktionen ----------
@@ -250,7 +352,8 @@ public class FunGambleClient implements ClientModInitializer {
 	}
 
 	private static boolean isBusy() {
-		return running != null || crashActive || bjActive || reflexState != 0 || towerActive || minesActive;
+		return running != null || crashActive || bjActive || reflexState != 0 || towerActive || minesActive
+			|| ladderActive || streakActive || pokerState == 1;
 	}
 
 	private static Text reel(int s) {
@@ -799,6 +902,550 @@ public class FunGambleClient implements ClientModInitializer {
 		return 1;
 	}
 
+	// ---------- Weitere Spiele mit Animation ----------
+
+	private static int d6() {
+		return RNG.nextInt(6) + 1;
+	}
+
+	// Wuerfel 100: Eine Zahl von 1 bis 100, du tippst ueber oder unter einer Schwelle
+	static double dice100Multiplier(boolean over, int threshold) {
+		double chance = over ? 100 - threshold : threshold;
+		return Math.round(96.0 / chance * 100.0) / 100.0;
+	}
+
+	private static Game dice100(boolean over, int threshold) {
+		final int roll = RNG.nextInt(100) + 1;
+		final boolean win = over ? roll > threshold : roll <= threshold;
+		final double mult = win ? dice100Multiplier(over, threshold) : 0.0;
+		final String cond = (over ? "über " : "bis ") + threshold;
+		final Text result = Text.literal("Würfel 100: " + roll + "  (Ziel: " + cond + ")")
+			.formatted(win ? Formatting.GREEN : Formatting.RED);
+
+		IntConsumer tick = t -> {
+			if (t % 2 == 0) {
+				overlay(Text.literal("Würfel 100: " + (RNG.nextInt(100) + 1) + " ...  (Ziel: " + cond + ")").formatted(Formatting.WHITE));
+				sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.0f + (t / 60.0f));
+			}
+		};
+		return new Game(mult, result, 30, tick);
+	}
+
+	// Lotto: Rate eine Zahl von 1 bis 10
+	private static Game lotto(int pick) {
+		final int drawn = RNG.nextInt(10) + 1;
+		final double mult = drawn == pick ? 9.0 : 0.0;
+		final Text result = Text.literal("Gezogen: " + drawn + "  (dein Tipp: " + pick + ")").formatted(Formatting.GOLD);
+
+		IntConsumer tick = t -> {
+			boolean show = (t < 30 && t % 2 == 0) || (t >= 30 && t < 45 && t % 3 == 0) || (t >= 45 && t % 5 == 0);
+			if (show) {
+				int shown = (t >= 55) ? drawn : RNG.nextInt(10) + 1;
+				overlay(Text.literal("Lotto-Ziehung: " + shown).formatted(Formatting.GOLD));
+				sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.8f - (t / 60.0f));
+			}
+		};
+		return new Game(mult, result, 60, tick);
+	}
+
+	// Baccarat (vereinfacht): Spieler, Bank oder Unentschieden. Zwei Karten, hoechste Endziffer gewinnt.
+	private static int bacValue(int rank) {
+		return rank < 10 ? rank : 0;
+	}
+
+	private static Game baccarat(int side) {
+		final int p1 = draw();
+		final int p2 = draw();
+		final int b1 = draw();
+		final int b2 = draw();
+		final int pt = (bacValue(p1) + bacValue(p2)) % 10;
+		final int bt = (bacValue(b1) + bacValue(b2)) % 10;
+		final int winner = pt > bt ? 0 : (bt > pt ? 1 : 2);
+		final double mult = winner == side ? (side == 2 ? 9.0 : 2.1) : 0.0;
+		final String pFull = cardName(p1) + ", " + cardName(p2) + " (" + pt + ")";
+		final String bFull = cardName(b1) + ", " + cardName(b2) + " (" + bt + ")";
+		final String outcome = winner == 0 ? "Spieler gewinnt" : (winner == 1 ? "Bank gewinnt" : "Unentschieden");
+		final Text result = Text.literal("Spieler: " + pFull + "  |  Bank: " + bFull + "  →  " + outcome).formatted(Formatting.WHITE);
+
+		IntConsumer tick = t -> {
+			if (t % 10 == 0) {
+				int stage = t / 10;
+				String line;
+				if (stage <= 1) {
+					line = "Spieler: " + cardName(p1) + ", ?";
+				} else if (stage == 2) {
+					line = "Spieler: " + pFull;
+				} else if (stage == 3) {
+					line = "Spieler: " + pFull + "  |  Bank: " + cardName(b1) + ", ?";
+				} else {
+					line = "Spieler: " + pFull + "  |  Bank: " + bFull;
+				}
+				overlay(Text.literal(line).formatted(Formatting.WHITE));
+				sound(SoundEvents.BLOCK_LEVER_CLICK, 1.0f + 0.1f * stage);
+			}
+		};
+		return new Game(mult, result, 46, tick);
+	}
+
+	// Craps (Pass-Line): 7 oder 11 gewinnt sofort, 2/3/12 verliert, sonst wird ein Punkt gespielt
+	private static Game craps() {
+		final List<String> steps = new ArrayList<>();
+		final int first = d6() + d6();
+		boolean win;
+		if (first == 7 || first == 11) {
+			steps.add("Craps: Come-out " + first + " – Gewonnen!");
+			win = true;
+		} else if (first == 2 || first == 3 || first == 12) {
+			steps.add("Craps: Come-out " + first + " – Verloren!");
+			win = false;
+		} else {
+			steps.add("Craps: Come-out " + first + " – der Punkt ist " + first);
+			win = false;
+			boolean resolved = false;
+			for (int i = 0; i < 15 && !resolved; i++) {
+				int n = d6() + d6();
+				if (n == first) {
+					steps.add("Wurf " + n + " – Punkt getroffen! Gewonnen!");
+					win = true;
+					resolved = true;
+				} else if (n == 7) {
+					steps.add("Wurf 7 – Verloren!");
+					resolved = true;
+				} else {
+					steps.add("Wurf " + n + " – weiter...");
+				}
+			}
+			if (!resolved) {
+				steps.add("Zu lange gewürfelt – Verloren.");
+			}
+		}
+		final boolean won = win;
+		final Text result = Text.literal(steps.get(steps.size() - 1)).formatted(won ? Formatting.GREEN : Formatting.RED);
+
+		IntConsumer tick = t -> {
+			if (t == 1) {
+				overlay(Text.literal("Craps: Würfel rollen...").formatted(Formatting.GOLD));
+			}
+			if (t % 12 == 0) {
+				int idx = t / 12 - 1;
+				if (idx >= 0 && idx < steps.size()) {
+					overlay(Text.literal(steps.get(idx)).formatted(Formatting.WHITE));
+					sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.2f);
+				}
+			}
+		};
+		return new Game(won ? 1.95 : 0.0, result, steps.size() * 12 + 8, tick);
+	}
+
+	// Huetchenspiel: Unter welchem Becher ist der Ball?
+	private static Game cups(int pick) {
+		final int ball = RNG.nextInt(3);
+		final double mult = pick == ball ? 2.85 : 0.0;
+		final Text result = Text.literal("Der Ball war unter Becher " + (ball + 1) + "  (dein Tipp: " + (pick + 1) + ")").formatted(Formatting.GOLD);
+
+		IntConsumer tick = t -> {
+			if (t % 4 == 0 && t < 44) {
+				String dots = ".".repeat(1 + (t / 4) % 3);
+				overlay(Text.literal("Becher werden gemischt" + dots).formatted(Formatting.GOLD));
+				sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 0.8f + (t / 80.0f));
+			}
+		};
+		return new Game(mult, result, 50, tick);
+	}
+
+	// Schatzkisten: vier Kisten mit verschiedenem Inhalt
+	private static Game chests(int pick) {
+		List<Double> values = new ArrayList<>(List.of(0.0, 0.5, 1.0, 2.4));
+		Collections.shuffle(values, RNG);
+		final double[] contents = new double[4];
+		StringBuilder all = new StringBuilder();
+		for (int i = 0; i < 4; i++) {
+			contents[i] = values.get(i);
+			if (i > 0) all.append(", ");
+			all.append(wheelLabel(contents[i]));
+		}
+		final double mult = contents[pick];
+		final Text result = Text.literal("Kiste " + (pick + 1) + ": " + wheelLabel(mult) + "  (Inhalt: " + all + ")").formatted(Formatting.GOLD);
+
+		IntConsumer tick = t -> {
+			if (t % 6 == 0 && t < 36) {
+				overlay(Text.literal("Kiste " + (pick + 1) + " öffnet sich" + ".".repeat(1 + (t / 6) % 3)).formatted(Formatting.GOLD));
+				sound(SoundEvents.BLOCK_LEVER_CLICK, 0.8f + (t / 80.0f));
+			}
+		};
+		return new Game(mult, result, 36, tick);
+	}
+
+	// Pferderennen: Fuenf Pferde mit unterschiedlichen Quoten
+	static String raceLabel(int i) {
+		double o = RACE_ODDS[i];
+		return RACE_NAMES[i] + " x" + (o == Math.floor(o) ? String.valueOf((int) o) : String.valueOf(o));
+	}
+
+	private static Game race(int horse) {
+		double r = RNG.nextDouble();
+		int w = RACE_P.length - 1;
+		double acc = 0;
+		for (int i = 0; i < RACE_P.length; i++) {
+			acc += RACE_P[i];
+			if (r < acc) {
+				w = i;
+				break;
+			}
+		}
+		final int winner = w;
+		final int[] finish = new int[RACE_NAMES.length];
+		for (int i = 0; i < finish.length; i++) {
+			finish[i] = (i == winner) ? 60 : 63 + RNG.nextInt(14);
+		}
+		final double mult = horse == winner ? RACE_ODDS[horse] : 0.0;
+		final Text result = Text.literal("Sieger: " + RACE_NAMES[winner] + "  (dein Pferd: " + RACE_NAMES[horse] + ")")
+			.formatted(horse == winner ? Formatting.GREEN : Formatting.RED);
+
+		IntConsumer tick = t -> {
+			if (t % 4 == 0) {
+				int leader = 0;
+				double best = -1;
+				for (int i = 0; i < finish.length; i++) {
+					double progress = (double) t / finish[i];
+					if (t < 56) {
+						progress += (RNG.nextDouble() - 0.5) * 0.12;
+					}
+					if (progress > best) {
+						best = progress;
+						leader = i;
+					}
+				}
+				overlay(Text.literal("Rennen läuft! " + RACE_NAMES[leader] + " führt").formatted(Formatting.GOLD));
+				sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.0f + (t / 120.0f));
+			}
+		};
+		return new Game(mult, result, 66, tick);
+	}
+
+	// Sic Bo (Gross/Klein): drei Wuerfel, ein Dreierpasch verliert immer
+	private static Game sicBo(boolean big) {
+		final int a = d6();
+		final int b = d6();
+		final int c = d6();
+		final int sum = a + b + c;
+		final boolean triple = a == b && b == c;
+		final boolean win = !triple && (big ? sum >= 11 : sum <= 10);
+		final Text result = Text.literal("Sic Bo: " + a + " + " + b + " + " + c + " = " + sum
+			+ (triple ? "  (Dreierpasch – Bank gewinnt)" : "")).formatted(Formatting.WHITE);
+
+		IntConsumer tick = t -> {
+			if (t % 3 == 0 && t < 30) {
+				overlay(Text.literal("Sic Bo: " + d6() + " + " + d6() + " + " + d6()).formatted(Formatting.WHITE));
+				sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.0f + (t / 60.0f));
+			}
+		};
+		return new Game(win ? 2.0 : 0.0, result, 30, tick);
+	}
+
+	// ---------- Kartenleiter (Hoch/Tief-Serie) ----------
+
+	private static String ladderInfo() {
+		int high = 13 - ladderCard;
+		int low = ladderCard - 1;
+		String h = high > 0 ? "x" + fmt(0.96 * 13.0 / high) : "unmöglich";
+		String l = low > 0 ? "x" + fmt(0.96 * 13.0 / low) : "unmöglich";
+		return "Karte: " + cardName(ladderCard) + "  |  Hoch: " + h + "  |  Tief: " + l + "  |  aktuell: x" + fmt(ladderMult);
+	}
+
+	static int ladderStart(long bet) {
+		if (isBusy()) {
+			chat("Beende erst deine laufende Runde!", Formatting.YELLOW);
+			return 0;
+		}
+		if (bet > balance) {
+			chat("Nicht genug Spielgeld! Du hast nur " + balance + ".", Formatting.RED);
+			return 0;
+		}
+		balance -= bet;
+		save();
+		ladderBet = bet;
+		ladderMult = 1.0;
+		ladderCard = draw();
+		ladderActive = true;
+		chat("Kartenleiter gestartet! Wird die nächste Karte höher oder tiefer? Gleichstand verliert.", Formatting.AQUA);
+		chat(ladderInfo(), Formatting.WHITE);
+		return 1;
+	}
+
+	static int ladderGuess(boolean high) {
+		if (!ladderActive) {
+			chat("Keine laufende Kartenleiter. Starte mit /gamble ladder <einsatz>.", Formatting.YELLOW);
+			return 0;
+		}
+		int count = high ? 13 - ladderCard : ladderCard - 1;
+		int next = draw();
+		boolean win = high ? next > ladderCard : next < ladderCard;
+		sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.2f);
+		if (!win) {
+			ladderActive = false;
+			chat("Nächste Karte: " + cardName(next) + " – verloren!", Formatting.RED);
+			payoutAndReport(ladderBet, 0.0);
+			return 1;
+		}
+		ladderMult *= 0.96 * 13.0 / count;
+		ladderCard = next;
+		chat("Richtig! Nächste Karte: " + cardName(next), Formatting.GREEN);
+		chat(ladderInfo(), Formatting.WHITE);
+		return 1;
+	}
+
+	static int ladderCash() {
+		if (!ladderActive) {
+			chat("Keine laufende Kartenleiter.", Formatting.YELLOW);
+			return 0;
+		}
+		if (ladderMult <= 1.0) {
+			chat("Rate erst mindestens einmal!", Formatting.YELLOW);
+			return 0;
+		}
+		ladderActive = false;
+		payoutAndReport(ladderBet, ladderMult);
+		return 1;
+	}
+
+	// ---------- Muenz-Serie ----------
+
+	static int streakStart(long bet) {
+		if (isBusy()) {
+			chat("Beende erst deine laufende Runde!", Formatting.YELLOW);
+			return 0;
+		}
+		if (bet > balance) {
+			chat("Nicht genug Spielgeld! Du hast nur " + balance + ".", Formatting.RED);
+			return 0;
+		}
+		balance -= bet;
+		save();
+		streakBet = bet;
+		streakMult = 1.0;
+		streakCount = 0;
+		streakActive = true;
+		chat("Münz-Serie gestartet! Jeder Kopf verdoppelt (fast) deinen Gewinn, bei Zahl ist alles weg.", Formatting.AQUA);
+		return 1;
+	}
+
+	static int streakFlip() {
+		if (!streakActive) {
+			chat("Keine laufende Münz-Serie. Starte mit /gamble streak <einsatz>.", Formatting.YELLOW);
+			return 0;
+		}
+		if (RNG.nextBoolean()) {
+			streakCount++;
+			streakMult *= 1.9;
+			sound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 0.8f + 0.05f * streakCount);
+			chat("Kopf! Serie: " + streakCount + "  –  x" + fmt(streakMult) + "  (weiter werfen oder auszahlen)", Formatting.GREEN);
+		} else {
+			streakActive = false;
+			chat("Zahl! Die Serie ist vorbei.", Formatting.RED);
+			payoutAndReport(streakBet, 0.0);
+		}
+		return 1;
+	}
+
+	static int streakCash() {
+		if (!streakActive) {
+			chat("Keine laufende Münz-Serie.", Formatting.YELLOW);
+			return 0;
+		}
+		if (streakCount == 0) {
+			chat("Wirf erst mindestens einmal!", Formatting.YELLOW);
+			return 0;
+		}
+		streakActive = false;
+		payoutAndReport(streakBet, streakMult);
+		return 1;
+	}
+
+	// ---------- Video-Poker (Jacks or Better) ----------
+
+	private static int rankOf(int card) {
+		return card % 13 + 1;
+	}
+
+	private static String suitName(int card) {
+		return switch (card / 13) {
+			case 0 -> "Pik";
+			case 1 -> "Herz";
+			case 2 -> "Karo";
+			default -> "Kreuz";
+		};
+	}
+
+	private static String pokerCardName(int card) {
+		return cardName(rankOf(card)) + " " + suitName(card);
+	}
+
+	private static int pokerRank(int[] hand) {
+		int[] cnt = new int[14];
+		boolean flush = true;
+		for (int c : hand) {
+			cnt[rankOf(c)]++;
+			if (c / 13 != hand[0] / 13) {
+				flush = false;
+			}
+		}
+		int pairs = 0;
+		int trips = 0;
+		int quads = 0;
+		boolean highPair = false;
+		int distinct = 0;
+		int lo = 14;
+		int hi = 0;
+		for (int r = 1; r <= 13; r++) {
+			if (cnt[r] > 0) {
+				distinct++;
+				lo = Math.min(lo, r);
+				hi = Math.max(hi, r);
+			}
+			if (cnt[r] == 2) {
+				pairs++;
+				if (r == 1 || r >= 11) highPair = true;
+			} else if (cnt[r] == 3) {
+				trips++;
+			} else if (cnt[r] == 4) {
+				quads++;
+			}
+		}
+		boolean straight = false;
+		if (distinct == 5) {
+			if (hi - lo == 4) {
+				straight = true;
+			} else if (cnt[1] > 0 && cnt[10] > 0 && cnt[11] > 0 && cnt[12] > 0 && cnt[13] > 0) {
+				straight = true; // Ass hoch
+			}
+		}
+		if (straight && flush && cnt[1] > 0 && cnt[13] > 0) return 9;
+		if (straight && flush) return 8;
+		if (quads > 0) return 7;
+		if (trips > 0 && pairs == 1) return 6;
+		if (flush) return 5;
+		if (straight) return 4;
+		if (trips > 0) return 3;
+		if (pairs == 2) return 2;
+		if (highPair) return 1;
+		return 0;
+	}
+
+	static int pokerDeal(long bet) {
+		if (isBusy()) {
+			chat("Beende erst deine laufende Runde!", Formatting.YELLOW);
+			return 0;
+		}
+		if (bet > balance) {
+			chat("Nicht genug Spielgeld! Du hast nur " + balance + ".", Formatting.RED);
+			return 0;
+		}
+		balance -= bet;
+		save();
+		pokerBet = bet;
+		pokerDeck.clear();
+		for (int i = 0; i < 52; i++) {
+			pokerDeck.add(i);
+		}
+		Collections.shuffle(pokerDeck, RNG);
+		for (int i = 0; i < 5; i++) {
+			pokerHand[i] = pokerDeck.remove(0);
+			pokerHold[i] = false;
+		}
+		pokerState = 1;
+		sound(SoundEvents.BLOCK_LEVER_CLICK, 1.2f);
+		chat("Video-Poker: Klicke Karten zum Halten, dann \"Tauschen\" (/gamble hold <1-5>, /gamble draw).", Formatting.AQUA);
+		chat("Aktuell: " + POKER_NAMES[pokerRank(pokerHand)], Formatting.WHITE);
+		return 1;
+	}
+
+	static int pokerToggle(int index) {
+		if (pokerState != 1) {
+			chat("Keine laufende Poker-Runde. Teile zuerst aus.", Formatting.YELLOW);
+			return 0;
+		}
+		pokerHold[index] = !pokerHold[index];
+		sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, pokerHold[index] ? 1.4f : 1.0f);
+		return 1;
+	}
+
+	static int pokerDraw() {
+		if (pokerState != 1) {
+			chat("Keine laufende Poker-Runde. Teile zuerst aus.", Formatting.YELLOW);
+			return 0;
+		}
+		for (int i = 0; i < 5; i++) {
+			if (!pokerHold[i]) {
+				pokerHand[i] = pokerDeck.remove(0);
+			}
+		}
+		pokerState = 2;
+		int rank = pokerRank(pokerHand);
+		chat("Ergebnis: " + POKER_NAMES[rank], rank > 0 ? Formatting.GREEN : Formatting.GRAY);
+		payoutAndReport(pokerBet, POKER_PAY[rank]);
+		return 1;
+	}
+
+	static Text pokerCardLabel(int i) {
+		if (pokerState == 0) {
+			return Text.literal("Karte " + (i + 1) + ": –").formatted(Formatting.GRAY);
+		}
+		String text = "Karte " + (i + 1) + ": " + pokerCardName(pokerHand[i]);
+		if (pokerState == 1 && pokerHold[i]) {
+			return Text.literal(text + "   [HALTEN]").formatted(Formatting.GREEN);
+		}
+		return Text.literal(text).formatted(Formatting.WHITE);
+	}
+
+	// ---------- Blackjack-Anzeige und Verdoppeln ----------
+
+	static Text bjPlayerText() {
+		if (bjPlayer.isEmpty()) {
+			return Text.literal("Deine Karten: –").formatted(Formatting.GRAY);
+		}
+		return Text.literal("Du: " + handText(bjPlayer)).formatted(Formatting.WHITE);
+	}
+
+	static Text bjDealerText() {
+		if (bjDealer.isEmpty()) {
+			return Text.literal("Dealer: –").formatted(Formatting.GRAY);
+		}
+		if (bjActive) {
+			return Text.literal("Dealer: " + cardName(bjDealer.get(0)) + ", ?").formatted(Formatting.GRAY);
+		}
+		return Text.literal("Dealer: " + handText(bjDealer)).formatted(Formatting.GRAY);
+	}
+
+	static int bjDouble() {
+		if (!bjActive) {
+			chat("Keine laufende Blackjack-Runde. Starte mit /gamble blackjack <einsatz>.", Formatting.YELLOW);
+			return 0;
+		}
+		if (bjPlayer.size() != 2) {
+			chat("Verdoppeln geht nur mit den ersten zwei Karten.", Formatting.YELLOW);
+			return 0;
+		}
+		if (balance < bjBet) {
+			chat("Nicht genug Spielgeld zum Verdoppeln.", Formatting.RED);
+			return 0;
+		}
+		balance -= bjBet;
+		bjBet *= 2;
+		save();
+		bjPlayer.add(draw());
+		sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.3f);
+		chat("Verdoppelt! Du ziehst: " + cardName(bjPlayer.get(bjPlayer.size() - 1)) + " → " + handText(bjPlayer), Formatting.WHITE);
+		if (total(bjPlayer) > 21) {
+			bjActive = false;
+			chat("Überkauft!", Formatting.RED);
+			payoutAndReport(bjBet, 0.0);
+		} else {
+			dealerPlay();
+		}
+		return 1;
+	}
+
 	// ---------- Crash ----------
 
 	private static double crashMult(int ticks) {
@@ -1090,6 +1737,9 @@ public class FunGambleClient implements ClientModInitializer {
 		chat("/gamble highlow <einsatz> <hoch|tief>", Formatting.WHITE);
 		chat("/gamble crash <einsatz>  →  /gamble cashout", Formatting.WHITE);
 		chat("/gamble blackjack <einsatz>  →  /gamble hit | stand", Formatting.WHITE);
+		chat("Karten: blackjack (hit, stand, double) | poker (hold, draw) | baccarat | ladder (up, down, laddercash)", Formatting.WHITE);
+		chat("Würfel: dice100 | craps | sicbo | lotto | cups | chests | race | streak (flip, streakcash)", Formatting.WHITE);
+		chat("Menüs: /gamble menu <automaten|wuerfel|karten|risiko|sonstiges|rennen|blackjack|poker|mines|shop>", Formatting.WHITE);
 		chat("Mini-Games: /gamble rps | plinko | scratch | reflex (go) | tower (door, towercash) | mines | daily", Formatting.WHITE);
 		chat("/gamble shop  →  /gamble buy <item>  |  equip <item>  |  unequip <title|sound>", Formatting.WHITE);
 		chat("/gamble reset", Formatting.WHITE);
@@ -1121,9 +1771,25 @@ public class FunGambleClient implements ClientModInitializer {
 		return 1;
 	}
 
-	private static int openScreen(int which) {
+	static CasinoScreen createScreen(String name) {
+		return switch (name) {
+			case "automaten" -> new SlotsScreen();
+			case "wuerfel" -> new DiceScreen();
+			case "karten" -> new CardsScreen();
+			case "risiko" -> new RiskScreen();
+			case "sonstiges" -> new MiscScreen();
+			case "rennen" -> new RaceScreen();
+			case "blackjack" -> new BlackjackScreen();
+			case "poker" -> new PokerScreen();
+			case "mines" -> new MinesScreen();
+			case "shop" -> new ShopScreen();
+			default -> new GambleScreen();
+		};
+	}
+
+	private static int openScreenByName(String name) {
 		MinecraftClient mc = MinecraftClient.getInstance();
-		mc.send(() -> mc.setScreen(which == 1 ? new MinesScreen() : new MiniScreen()));
+		mc.send(() -> mc.setScreen(createScreen(name)));
 		return 1;
 	}
 
@@ -1172,6 +1838,34 @@ public class FunGambleClient implements ClientModInitializer {
 	static void uiMinesReveal(int index) { minesReveal(index); }
 	static void uiMinesCash() { minesCash(); }
 	static void uiDaily() { daily(); }
+	static void uiDice100(long bet, boolean over) { startGame(bet, () -> dice100(over, DICE100_THRESHOLDS[dice100Index])); }
+	static void uiCycleDice100() { dice100Index = (dice100Index + 1) % DICE100_THRESHOLDS.length; }
+	static void uiLotto(long bet, int n) { startGame(bet, () -> lotto(n)); }
+	static void uiBaccarat(long bet, int side) { startGame(bet, () -> baccarat(side)); }
+	static void uiCraps(long bet) { startGame(bet, FunGambleClient::craps); }
+	static void uiCups(long bet, int pick) { startGame(bet, () -> cups(pick)); }
+	static void uiChests(long bet, int pick) { startGame(bet, () -> chests(pick)); }
+	static void uiRace(long bet, int horse) { startGame(bet, () -> race(horse)); }
+	static void uiSicBo(long bet, boolean big) { startGame(bet, () -> sicBo(big)); }
+	static void uiPokerDeal(long bet) { pokerDeal(bet); }
+	static void uiPokerHold(int i) { pokerToggle(i); }
+	static void uiPokerDraw() { pokerDraw(); }
+	static void uiLadderStart(long bet) { ladderStart(bet); }
+	static void uiLadderGuess(boolean high) { ladderGuess(high); }
+	static void uiLadderCash() { ladderCash(); }
+	static void uiStreakStart(long bet) { streakStart(bet); }
+	static void uiStreakFlip() { streakFlip(); }
+	static void uiStreakCash() { streakCash(); }
+	static void uiBjDouble() { bjDouble(); }
+
+	static Text dice100ThresholdLabel() {
+		return Text.literal("Schwelle: " + DICE100_THRESHOLDS[dice100Index] + "  (klicken zum Ändern)").formatted(Formatting.AQUA);
+	}
+
+	static Text dice100Label(boolean over) {
+		int th = DICE100_THRESHOLDS[dice100Index];
+		return Text.literal((over ? "Über " : "Bis ") + th + "  (x" + fmt(dice100Multiplier(over, th)) + ")");
+	}
 	static void uiCashout() { cashout(); }
 	static void uiHit() { bjHit(); }
 	static void uiStand() { bjStand(); }
