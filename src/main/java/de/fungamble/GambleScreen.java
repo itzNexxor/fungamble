@@ -18,7 +18,7 @@ public class GambleScreen extends CasinoScreen {
 
 	@Override
 	protected void init() {
-		int y = startY(9);
+		int y = startY(10);
 		y = header(y, false);
 
 		btn(2, 0, y, "Automaten →", () -> open(new SlotsScreen()));
@@ -38,11 +38,14 @@ public class GambleScreen extends CasinoScreen {
 		y += ROW;
 
 		btn(2, 0, y, "Mines →", () -> open(new MinesScreen()));
-		btn(2, 1, y, "Shop →", () -> open(new ShopScreen()));
+		btn(2, 1, y, "Memory (Texturpack) →", () -> open(new MemoryScreen()));
 		y += ROW;
 
-		btn(2, 0, y, "Tägliche Belohnung", FunGambleClient::uiDaily);
-		btn(2, 1, y, "Schließen", this::close);
+		btn(2, 0, y, "Shop →", () -> open(new ShopScreen()));
+		btn(2, 1, y, "Tägliche Belohnung", FunGambleClient::uiDaily);
+		y += ROW;
+
+		wide(y, "Schließen", this::close);
 
 		refresh();
 	}
@@ -103,6 +106,11 @@ abstract class CasinoScreen extends Screen {
 
 	protected ButtonWidget button(int x, int y, int w, String text, Runnable action) {
 		ButtonWidget b = ButtonWidget.builder(Text.literal(text), btn -> action.run()).dimensions(x, y, w, 18).build();
+		return this.addDrawableChild(b);
+	}
+
+	protected ButtonWidget buttonH(int x, int y, int w, int h, String text, Runnable action) {
+		ButtonWidget b = ButtonWidget.builder(Text.literal(text), btn -> action.run()).dimensions(x, y, w, h).build();
 		return this.addDrawableChild(b);
 	}
 
@@ -484,6 +492,59 @@ class PokerScreen extends CasinoScreen {
 		for (int i = 0; i < cards.length; i++) {
 			if (cards[i] != null) {
 				cards[i].setMessage(FunGambleClient.pokerCardLabel(i));
+			}
+		}
+	}
+}
+
+/** Memory: 12 Karten, 6 Paare. Mit dem Texturpack mit schoenen Bildern. */
+class MemoryScreen extends CasinoScreen {
+
+	private final ButtonWidget[] cells = new ButtonWidget[12];
+	private ButtonWidget packLabel;
+
+	MemoryScreen() {
+		super("Memory");
+	}
+
+	@Override
+	protected void init() {
+		final int cellH = 32;
+		final int gap = 2;
+		int total = 6 * ROW + 3 * (cellH + gap) + ROW;
+		int y = Math.max(4, (this.height - total) / 2);
+		y = header(y, true);
+
+		btn(2, 0, y, "Neue Runde", () -> FunGambleClient.uiMemoryStart(bet()));
+		btn(2, 1, y, "Zurück", () -> open(new GambleScreen()));
+		y += ROW;
+
+		packLabel = label(left(), y, W);
+		y += ROW;
+
+		final int cols = 4;
+		final int cellW = colWidth(cols);
+		for (int r = 0; r < 3; r++) {
+			for (int c = 0; c < cols; c++) {
+				final int index = r * cols + c;
+				cells[index] = buttonH(colX(cols, c), y, cellW, cellH, "?", () -> FunGambleClient.uiMemoryFlip(index));
+			}
+			y += cellH + gap;
+		}
+
+		refresh();
+	}
+
+	@Override
+	protected void refresh() {
+		super.refresh();
+		if (packLabel == null) {
+			return;
+		}
+		packLabel.setMessage(FunGambleClient.packStatusText());
+		for (int i = 0; i < cells.length; i++) {
+			if (cells[i] != null) {
+				cells[i].setMessage(FunGambleClient.memoryCellLabel(i));
 			}
 		}
 	}
