@@ -16,6 +16,7 @@ import net.minecraft.client.sound.PositionedSoundInstance;
 import net.minecraft.sound.SoundEvent;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.text.Text;
+import net.minecraft.util.Identifier;
 import net.minecraft.util.Formatting;
 
 import java.io.StringReader;
@@ -39,7 +40,7 @@ import java.util.function.Supplier;
  * Der Server (und andere Spieler) bekommen davon nichts mit.
  * Spielgeld ist nicht echt und hat nichts mit Items im Spiel zu tun.
  *
- * Version 2.0: ueber 25 Spiele, eigene Menues (Blackjack, Poker, Mines ...), Shop, Daily.
+ * Version 2.1: ueber 25 Spiele, Menues, Shop, Daily + Memory und Bild-Symbole mit dem Texturpack.
  */
 public class FunGambleClient implements ClientModInitializer {
 
@@ -148,6 +149,28 @@ public class FunGambleClient implements ClientModInitializer {
 	private static final double[] RACE_P = {0.38, 0.27, 0.19, 0.12, 0.04};
 	private static final double[] RACE_ODDS = {2.5, 3.5, 5.0, 7.9, 23.0};
 
+	// Bild-Symbole aus dem Texturpack (private Unicode-Zeichen, ohne Pack nur leere Kaestchen)
+	private static final String[] ICON_SLOT = {"\uE000", "\uE001", "\uE002", "\uE003", "\uE004", "\uE005"};
+	private static final String[] ICON_DIE = {"\uE008", "\uE009", "\uE00A", "\uE00B", "\uE00C", "\uE00D"};
+	private static final String ICON_BOMB = "\uE00E";
+	private static final String ICON_GEM = "\uE00F";
+	private static final String[] ICON_SUIT = {"\uE010", "\uE011", "\uE012", "\uE013"};
+	private static final String[] ICON_BIG = {"\uE100", "\uE101", "\uE102", "\uE103", "\uE104", "\uE105"};
+	private static final String ICON_BIG_BACK = "\uE114";
+	private static long packCheckedAt = 0;
+	private static boolean packCached = false;
+
+	// Memory (6 Paare, 12 Karten)
+	private static boolean memoryActive = false;
+	private static long memoryBet = 0;
+	private static final int[] memoryCards = new int[12];
+	private static final boolean[] memoryMatched = new boolean[12];
+	private static int memoryFirst = -1;
+	private static int memorySecond = -1;
+	private static int memoryMoves = 0;
+	private static int memoryPairs = 0;
+	private static int memoryHide = 0;
+
 	// Taegliche Belohnung
 	private static String lastDaily = "";
 	private static int dailyStreak = 0;
@@ -240,7 +263,7 @@ public class FunGambleClient implements ClientModInitializer {
 			LiteralArgumentBuilder<FabricClientCommandSource> menuNode =
 				ClientCommandManager.literal("menu").executes(ctx -> openMenu());
 			for (String n : new String[]{"automaten", "wuerfel", "karten", "risiko", "sonstiges", "rennen",
-				"blackjack", "poker", "mines", "shop"}) {
+				"blackjack", "poker", "mines", "memory", "shop"}) {
 				menuNode.then(ClientCommandManager.literal(n).executes(ctx -> openScreenByName(n)));
 			}
 			root.then(menuNode);
@@ -294,6 +317,12 @@ public class FunGambleClient implements ClientModInitializer {
 			root.then(lit("streak").then(bet().executes(ctx -> streakStart(LongArgumentType.getLong(ctx, "einsatz")))));
 			root.then(lit("flip").executes(ctx -> streakFlip()));
 			root.then(lit("streakcash").executes(ctx -> streakCash()));
+
+			// Memory und Texturpack
+			root.then(lit("memory").then(bet().executes(ctx -> memoryStart(LongArgumentType.getLong(ctx, "einsatz")))));
+			root.then(lit("pick").then(intArg("karte", 1, 12).executes(ctx ->
+				memoryFlip(IntegerArgumentType.getInteger(ctx, "karte") - 1))));
+			root.then(lit("pack").executes(ctx -> packInfo()));
 
 			// Blackjack: Verdoppeln
 			root.then(lit("double").executes(ctx -> bjDouble()));
@@ -353,11 +382,41 @@ public class FunGambleClient implements ClientModInitializer {
 
 	private static boolean isBusy() {
 		return running != null || crashActive || bjActive || reflexState != 0 || towerActive || minesActive
-			|| ladderActive || streakActive || pokerState == 1;
+			|| ladderActive || streakActive || pokerState == 1 || memoryActive;
 	}
 
 	private static Text reel(int s) {
+		if (packActive()) {
+			return Text.literal(ICON_SLOT[s]);
+		}
 		return Text.literal(SYMBOLS[s]).formatted(SYMBOL_COLORS[s]);
+	}
+
+	/** Erkennt, ob das Fun-Gamble-Texturpack aktiv ist (Ergebnis wird kurz zwischengespeichert). */
+	static boolean packActive() {
+		long now = System.currentTimeMillis();
+		if (now - packCheckedAt > 1500) {
+			packCheckedAt = now;
+			try {
+				MinecraftClient mc = MinecraftClient.getInstance();
+				packCached = mc.getResourceManager()
+					.getResource(Identifier.of("fungamble", "textures/font/icons.png")).isPresent();
+			} catch (Exception e) {
+				packCached = false;
+			}
+		}
+		return packCached;
+	}
+
+	static Text packStatusText() {
+		if (packActive()) {
+			return Text.literal("Texturpack aktiv – Bilder werden angezeigt").formatted(Formatting.GREEN);
+		}
+		return Text.literal("Kein Texturpack erkannt – es gibt nur Text (siehe /gamble pack)").formatted(Formatting.YELLOW);
+	}
+
+	private static String die(int n) {
+		return packActive() ? ICON_DIE[n - 1] : String.valueOf(n);
 	}
 
 	private static Text reels(int a, int b, int c) {
@@ -445,12 +504,12 @@ public class FunGambleClient implements ClientModInitializer {
 		final int you = RNG.nextInt(6) + 1;
 		final int dealer = RNG.nextInt(6) + 1;
 		final double mult = you > dealer ? 2.0 : (you == dealer ? 1.0 : 0.0);
-		final Text result = Text.literal("Du: " + you + "  |  Dealer: " + dealer).formatted(Formatting.WHITE);
+		final Text result = Text.literal("Du: " + die(you) + "  |  Dealer: " + die(dealer)).formatted(Formatting.WHITE);
 
 		IntConsumer tick = t -> {
 			if (t % 2 == 0 || t == 20) {
-				String youStr = t >= 20 ? String.valueOf(you) : String.valueOf(RNG.nextInt(6) + 1);
-				String dealerStr = t >= 40 ? String.valueOf(dealer) : (t >= 20 ? String.valueOf(RNG.nextInt(6) + 1) : "?");
+				String youStr = t >= 20 ? die(you) : die(RNG.nextInt(6) + 1);
+				String dealerStr = t >= 40 ? die(dealer) : (t >= 20 ? die(RNG.nextInt(6) + 1) : "?");
 				overlay(Text.literal("Du: " + youStr + "  |  Dealer: " + dealerStr).formatted(Formatting.WHITE));
 			}
 			if (t == 20 || t == 40) {
@@ -861,14 +920,15 @@ public class FunGambleClient implements ClientModInitializer {
 	}
 
 	static Text minesCellLabel(int i) {
+		boolean pack = packActive();
 		if (minesOpen[i] && minesMine[i]) {
-			return Text.literal("BOOM").formatted(Formatting.RED);
+			return pack ? Text.literal(ICON_BOMB) : Text.literal("BOOM").formatted(Formatting.RED);
 		}
 		if (minesOpen[i]) {
-			return Text.literal("Gem").formatted(Formatting.AQUA);
+			return pack ? Text.literal(ICON_GEM) : Text.literal("Gem").formatted(Formatting.AQUA);
 		}
 		if (minesDone && minesMine[i]) {
-			return Text.literal("Mine").formatted(Formatting.GRAY);
+			return pack ? Text.literal(ICON_BOMB) : Text.literal("Mine").formatted(Formatting.GRAY);
 		}
 		return Text.literal("?");
 	}
@@ -1269,6 +1329,9 @@ public class FunGambleClient implements ClientModInitializer {
 	}
 
 	private static String suitName(int card) {
+		if (packActive()) {
+			return ICON_SUIT[card / 13];
+		}
 		return switch (card / 13) {
 			case 0 -> "Pik";
 			case 1 -> "Herz";
@@ -1442,6 +1505,108 @@ public class FunGambleClient implements ClientModInitializer {
 			payoutAndReport(bjBet, 0.0);
 		} else {
 			dealerPlay();
+		}
+		return 1;
+	}
+
+	// ---------- Memory (mit Texturpack besonders huebsch) ----------
+
+	private static double memoryMultiplier(int moves) {
+		if (moves <= 7) return 4.0;
+		if (moves <= 9) return 2.5;
+		if (moves <= 11) return 1.5;
+		if (moves <= 13) return 1.0;
+		if (moves <= 16) return 0.5;
+		return 0.0;
+	}
+
+	static int memoryStart(long bet) {
+		if (isBusy()) {
+			chat("Beende erst deine laufende Runde!", Formatting.YELLOW);
+			return 0;
+		}
+		if (bet > balance) {
+			chat("Nicht genug Spielgeld! Du hast nur " + balance + ".", Formatting.RED);
+			return 0;
+		}
+		balance -= bet;
+		save();
+		memoryBet = bet;
+		List<Integer> deck = new ArrayList<>();
+		for (int i = 0; i < 6; i++) {
+			deck.add(i);
+			deck.add(i);
+		}
+		Collections.shuffle(deck, RNG);
+		for (int i = 0; i < 12; i++) {
+			memoryCards[i] = deck.get(i);
+			memoryMatched[i] = false;
+		}
+		memoryFirst = -1;
+		memorySecond = -1;
+		memoryMoves = 0;
+		memoryPairs = 0;
+		memoryHide = 0;
+		memoryActive = true;
+		chat("Memory gestartet! Finde alle 6 Paare mit möglichst wenigen Zügen (bis 7 Züge = x4).", Formatting.AQUA);
+		return 1;
+	}
+
+	static int memoryFlip(int index) {
+		if (!memoryActive) {
+			chat("Keine laufende Memory-Runde. Starte mit \"Neue Runde\".", Formatting.YELLOW);
+			return 0;
+		}
+		if (memoryHide > 0 || memoryMatched[index] || index == memoryFirst) {
+			return 0;
+		}
+		sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.2f);
+		if (memoryFirst < 0) {
+			memoryFirst = index;
+			return 1;
+		}
+		memorySecond = index;
+		memoryMoves++;
+		if (memoryCards[memoryFirst] == memoryCards[memorySecond]) {
+			memoryMatched[memoryFirst] = true;
+			memoryMatched[memorySecond] = true;
+			memoryFirst = -1;
+			memorySecond = -1;
+			memoryPairs++;
+			sound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 0.8f + 0.1f * memoryPairs);
+			if (memoryPairs >= 6) {
+				memoryActive = false;
+				chat("Alle Paare gefunden in " + memoryMoves + " Zügen!", Formatting.GREEN);
+				payoutAndReport(memoryBet, memoryMultiplier(memoryMoves));
+			} else {
+				chat("Paar gefunden! (" + memoryPairs + "/6, Züge: " + memoryMoves + ")", Formatting.GREEN);
+			}
+		} else {
+			memoryHide = 20;
+			chat("Kein Paar. Züge: " + memoryMoves, Formatting.GRAY);
+		}
+		return 1;
+	}
+
+	static Text memoryCellLabel(int i) {
+		boolean shown = memoryMatched[i] || i == memoryFirst || i == memorySecond;
+		boolean pack = packActive();
+		if (!shown) {
+			return pack ? Text.literal(ICON_BIG_BACK) : Text.literal("?").formatted(Formatting.GRAY);
+		}
+		int symbol = memoryCards[i];
+		if (pack) {
+			return Text.literal(ICON_BIG[symbol]);
+		}
+		return Text.literal(SYMBOLS[symbol]).formatted(SYMBOL_COLORS[symbol]);
+	}
+
+	private static int packInfo() {
+		if (packActive()) {
+			chat("Das Fun-Gamble-Texturpack ist aktiv. Slots, Würfel, Karten, Mines und Memory zeigen Bilder.", Formatting.GREEN);
+		} else {
+			chat("Kein Texturpack erkannt. Kopiere FunGamble-Texturpack.zip in den Ordner resourcepacks und aktiviere es", Formatting.YELLOW);
+			chat("unter Optionen → Ressourcenpakete. Dann zeigen Slots, Würfel, Karten, Mines und Memory Bilder.", Formatting.YELLOW);
 		}
 		return 1;
 	}
@@ -1660,6 +1825,13 @@ public class FunGambleClient implements ClientModInitializer {
 		if (reflexState != 0) {
 			tickReflex();
 		}
+		if (memoryHide > 0) {
+			memoryHide--;
+			if (memoryHide == 0) {
+				memoryFirst = -1;
+				memorySecond = -1;
+			}
+		}
 		tickAnimation();
 	}
 
@@ -1739,6 +1911,7 @@ public class FunGambleClient implements ClientModInitializer {
 		chat("/gamble blackjack <einsatz>  →  /gamble hit | stand", Formatting.WHITE);
 		chat("Karten: blackjack (hit, stand, double) | poker (hold, draw) | baccarat | ladder (up, down, laddercash)", Formatting.WHITE);
 		chat("Würfel: dice100 | craps | sicbo | lotto | cups | chests | race | streak (flip, streakcash)", Formatting.WHITE);
+		chat("Memory: /gamble memory <einsatz> | pick <1-12>   Texturpack-Info: /gamble pack", Formatting.WHITE);
 		chat("Menüs: /gamble menu <automaten|wuerfel|karten|risiko|sonstiges|rennen|blackjack|poker|mines|shop>", Formatting.WHITE);
 		chat("Mini-Games: /gamble rps | plinko | scratch | reflex (go) | tower (door, towercash) | mines | daily", Formatting.WHITE);
 		chat("/gamble shop  →  /gamble buy <item>  |  equip <item>  |  unequip <title|sound>", Formatting.WHITE);
@@ -1782,6 +1955,7 @@ public class FunGambleClient implements ClientModInitializer {
 			case "blackjack" -> new BlackjackScreen();
 			case "poker" -> new PokerScreen();
 			case "mines" -> new MinesScreen();
+			case "memory" -> new MemoryScreen();
 			case "shop" -> new ShopScreen();
 			default -> new GambleScreen();
 		};
@@ -1857,6 +2031,8 @@ public class FunGambleClient implements ClientModInitializer {
 	static void uiStreakFlip() { streakFlip(); }
 	static void uiStreakCash() { streakCash(); }
 	static void uiBjDouble() { bjDouble(); }
+	static void uiMemoryStart(long bet) { memoryStart(bet); }
+	static void uiMemoryFlip(int i) { memoryFlip(i); }
 
 	static Text dice100ThresholdLabel() {
 		return Text.literal("Schwelle: " + DICE100_THRESHOLDS[dice100Index] + "  (klicken zum Ändern)").formatted(Formatting.AQUA);
