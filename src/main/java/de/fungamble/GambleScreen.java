@@ -608,7 +608,7 @@ class ShopScreen extends CasinoScreen {
 
 	@Override
 	protected void init() {
-		int y = startY(8);
+		int y = startY(9);
 		y = header(y, false);
 
 		caption(y, "Extras und Kosmetik – nur für dich sichtbar");
@@ -626,8 +626,12 @@ class ShopScreen extends CasinoScreen {
 		btn(2, 1, y, "Kartenrücken", () -> open(new ShopListScreen("back", "Kartenrücken")));
 		y += ROW;
 
-		btn(2, 0, y, "Rettungsring", () -> open(new ShopListScreen("ring", "Rettungsring")));
-		btn(2, 1, y, "Zurück", () -> open(new GambleScreen()));
+		btn(2, 0, y, "Hüte (3D)", () -> open(new ShopListScreen("hat", "Hüte",
+			"Hüte brauchen das Texturpack und Cheats/OP (give-Befehl)")));
+		btn(2, 1, y, "Rettungsring", () -> open(new ShopListScreen("ring", "Rettungsring")));
+		y += ROW;
+
+		wide(y, "Zurück", () -> open(new GambleScreen()));
 		refresh();
 	}
 }
@@ -639,9 +643,16 @@ class ShopListScreen extends CasinoScreen {
 	private final List<FunGambleClient.Item> items = new ArrayList<>();
 	private final List<ButtonWidget> itemButtons = new ArrayList<>();
 
+	private final String hint;
+
 	ShopListScreen(String type, String title) {
+		this(type, title, null);
+	}
+
+	ShopListScreen(String type, String title, String hint) {
 		super(title);
 		this.type = type;
+		this.hint = hint;
 	}
 
 	@Override
@@ -650,15 +661,20 @@ class ShopListScreen extends CasinoScreen {
 		itemButtons.clear();
 		items.addAll(FunGambleClient.itemsOfType(type));
 
-		int y = startY(items.size() + 5);
+		int y = startY(items.size() + 5 + (hint != null ? 1 : 0));
 		y = header(y, false);
+
+		if (hint != null) {
+			caption(y, hint);
+			y += ROW;
+		}
 
 		for (FunGambleClient.Item item : items) {
 			itemButtons.add(wide(y, item.name(), () -> FunGambleClient.shopClick(item)));
 			y += ROW;
 		}
 
-		if (!type.equals("ring")) {
+		if (!type.equals("ring") && !type.equals("hat")) {
 			wide(y, "Ablegen (Standard)", () -> FunGambleClient.uiUnequip(type));
 			y += ROW;
 		}
