@@ -599,10 +599,8 @@ class MinesScreen extends CasinoScreen {
 	}
 }
 
-/** Der Spielgeld-Shop als Fenster. */
+/** Shop-Hauptmenue mit Kategorien (Extras und Kosmetik). */
 class ShopScreen extends CasinoScreen {
-
-	private final List<ButtonWidget> itemButtons = new ArrayList<>();
 
 	ShopScreen() {
 		super("Spielgeld-Shop");
@@ -610,17 +608,61 @@ class ShopScreen extends CasinoScreen {
 
 	@Override
 	protected void init() {
-		itemButtons.clear();
-		int y = startY(FunGambleClient.ITEMS.size() + 4);
+		int y = startY(8);
 		y = header(y, false);
 
-		for (FunGambleClient.Item item : FunGambleClient.ITEMS) {
-			ButtonWidget b = wide(y, item.name(), () -> FunGambleClient.shopClick(item));
-			itemButtons.add(b);
+		caption(y, "Extras und Kosmetik – nur für dich sichtbar");
+		y += ROW;
+
+		btn(2, 0, y, "Titel", () -> open(new ShopListScreen("title", "Titel")));
+		btn(2, 1, y, "Gewinn-Sounds", () -> open(new ShopListScreen("sound", "Gewinn-Sounds")));
+		y += ROW;
+
+		btn(2, 0, y, "Farben", () -> open(new ShopListScreen("color", "Farben")));
+		btn(2, 1, y, "Rahmen", () -> open(new ShopListScreen("frame", "Rahmen")));
+		y += ROW;
+
+		btn(2, 0, y, "Gewinn-Banner", () -> open(new ShopListScreen("banner", "Gewinn-Banner")));
+		btn(2, 1, y, "Kartenrücken", () -> open(new ShopListScreen("back", "Kartenrücken")));
+		y += ROW;
+
+		btn(2, 0, y, "Rettungsring", () -> open(new ShopListScreen("ring", "Rettungsring")));
+		btn(2, 1, y, "Zurück", () -> open(new GambleScreen()));
+		refresh();
+	}
+}
+
+/** Eine Kategorie des Shops als Liste. */
+class ShopListScreen extends CasinoScreen {
+
+	private final String type;
+	private final List<FunGambleClient.Item> items = new ArrayList<>();
+	private final List<ButtonWidget> itemButtons = new ArrayList<>();
+
+	ShopListScreen(String type, String title) {
+		super(title);
+		this.type = type;
+	}
+
+	@Override
+	protected void init() {
+		items.clear();
+		itemButtons.clear();
+		items.addAll(FunGambleClient.itemsOfType(type));
+
+		int y = startY(items.size() + 5);
+		y = header(y, false);
+
+		for (FunGambleClient.Item item : items) {
+			itemButtons.add(wide(y, item.name(), () -> FunGambleClient.shopClick(item)));
 			y += ROW;
 		}
 
-		wide(y, "Zurück zum Casino", () -> open(new GambleScreen()));
+		if (!type.equals("ring")) {
+			wide(y, "Ablegen (Standard)", () -> FunGambleClient.uiUnequip(type));
+			y += ROW;
+		}
+		wide(y, "Zurück zum Shop", () -> open(new ShopScreen()));
 		refresh();
 	}
 
@@ -628,7 +670,7 @@ class ShopScreen extends CasinoScreen {
 	protected void refresh() {
 		super.refresh();
 		for (int i = 0; i < itemButtons.size(); i++) {
-			itemButtons.get(i).setMessage(FunGambleClient.shopLabel(FunGambleClient.ITEMS.get(i)));
+			itemButtons.get(i).setMessage(FunGambleClient.shopLabel(items.get(i)));
 		}
 	}
 }
