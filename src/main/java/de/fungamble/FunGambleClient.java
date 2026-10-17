@@ -40,7 +40,7 @@ import java.util.function.Supplier;
  * Der Server (und andere Spieler) bekommen davon nichts mit.
  * Spielgeld ist nicht echt und hat nichts mit Items im Spiel zu tun.
  *
- * Version 2.1: ueber 25 Spiele, Menues, Shop, Daily + Memory und Bild-Symbole mit dem Texturpack.
+ * Version 2.2: ueber 25 Spiele, Menues, Shop, Daily, Memory, Texturpack-Bilder + Kosmetik-Shop.
  */
 public class FunGambleClient implements ClientModInitializer {
 
@@ -84,12 +84,35 @@ public class FunGambleClient implements ClientModInitializer {
 		new Item("feuerwerk", "Feuerwerk-Sound", "sound", 800, "Gewinn-Sound"),
 		new Item("glocke", "Glocken-Sound", "sound", 800, "Gewinn-Sound"),
 		new Item("donner", "Donner-Sound", "sound", 1500, "Gewinn-Sound"),
-		new Item("rettungsring", "Rettungsring", "ring", 300, "Bei einer Niete bekommst du 50 % vom Einsatz zurück (einmalig)")
+		new Item("rettungsring", "Rettungsring", "ring", 300, "Bei einer Niete bekommst du 50 % vom Einsatz zurück (einmalig)"),
+		// Kosmetik: Farben (Kontostand und Meldungen)
+		new Item("c_smaragd", "Smaragd-Grün", "color", 1000, "Farbe"),
+		new Item("c_ozean", "Ozean-Blau", "color", 1000, "Farbe"),
+		new Item("c_rubin", "Rubin-Rot", "color", 1000, "Farbe"),
+		new Item("c_violett", "Violett", "color", 1500, "Farbe"),
+		new Item("c_regenbogen", "Regenbogen (animiert)", "color", 5000, "Farbe"),
+		// Kosmetik: Rahmen um den Kontostand
+		new Item("f_tilde", "Tilde-Rahmen  ~ ~", "frame", 800, "Rahmen"),
+		new Item("f_sterne", "Sterne-Rahmen  * *", "frame", 800, "Rahmen"),
+		new Item("f_pfeile", "Pfeil-Rahmen  << >>", "frame", 1200, "Rahmen"),
+		new Item("f_klammern", "Klammer-Rahmen  [[ ]]", "frame", 1200, "Rahmen"),
+		new Item("f_linien", "Linien-Rahmen  === ===", "frame", 2000, "Rahmen"),
+		// Kosmetik: Gewinn-Banner
+		new Item("b_konfetti", "Konfetti-Banner", "banner", 2000, "Gewinn-Banner"),
+		new Item("b_gold", "Gold-Banner", "banner", 2500, "Gewinn-Banner"),
+		new Item("b_feuer", "Feuer-Banner", "banner", 3000, "Gewinn-Banner"),
+		// Kosmetik: Kartenruecken (brauchen das Texturpack)
+		new Item("k_rot", "Kartenrücken Rot (Texturpack)", "back", 1500, "Kartenrücken"),
+		new Item("k_gold", "Kartenrücken Schwarz-Gold (Texturpack)", "back", 3000, "Kartenrücken")
 	);
 
 	static final LinkedHashSet<String> owned = new LinkedHashSet<>();
 	static String activeTitle = "";
 	static String activeSound = "";
+	static String activeColor = "";
+	static String activeFrame = "";
+	static String activeBanner = "";
+	static String activeBack = "";
 	static int rings = 0;
 
 	// Plinko / Rubbellos
@@ -220,7 +243,7 @@ public class FunGambleClient implements ClientModInitializer {
 				.then(ClientCommandManager.literal("stand").executes(ctx -> bjStand()));
 
 			// Shop
-			root.then(ClientCommandManager.literal("shop").executes(ctx -> showShop()));
+			root.then(ClientCommandManager.literal("shop").executes(ctx -> openScreenByName("shop")));
 			LiteralArgumentBuilder<FabricClientCommandSource> buyNode = ClientCommandManager.literal("buy");
 			LiteralArgumentBuilder<FabricClientCommandSource> equipNode = ClientCommandManager.literal("equip");
 			for (Item item : ITEMS) {
@@ -232,9 +255,11 @@ public class FunGambleClient implements ClientModInitializer {
 			}
 			root.then(buyNode);
 			root.then(equipNode);
-			root.then(ClientCommandManager.literal("unequip")
-				.then(ClientCommandManager.literal("title").executes(ctx -> unequip("title")))
-				.then(ClientCommandManager.literal("sound").executes(ctx -> unequip("sound"))));
+			LiteralArgumentBuilder<FabricClientCommandSource> unequipNode = ClientCommandManager.literal("unequip");
+			for (String type : new String[]{"title", "sound", "color", "frame", "banner", "back"}) {
+				unequipNode.then(ClientCommandManager.literal(type).executes(ctx -> unequip(type)));
+			}
+			root.then(unequipNode);
 
 			// Mini-Games
 			root.then(ClientCommandManager.literal("rps").then(bet()
@@ -1592,7 +1617,7 @@ public class FunGambleClient implements ClientModInitializer {
 		boolean shown = memoryMatched[i] || i == memoryFirst || i == memorySecond;
 		boolean pack = packActive();
 		if (!shown) {
-			return pack ? Text.literal(ICON_BIG_BACK) : Text.literal("?").formatted(Formatting.GRAY);
+			return pack ? Text.literal(backIcon()) : Text.literal("?").formatted(Formatting.GRAY);
 		}
 		int symbol = memoryCards[i];
 		if (pack) {
@@ -1872,6 +1897,7 @@ public class FunGambleClient implements ClientModInitializer {
 
 		if (payout > bet) {
 			chat("Gewonnen! +" + (payout - bet) + " Spielgeld", Formatting.GREEN);
+			showWinBanner(payout - bet);
 			SoundEvent custom = soundFor(activeSound);
 			if (custom != null) {
 				sound(custom, 1.0f);
@@ -1914,7 +1940,7 @@ public class FunGambleClient implements ClientModInitializer {
 		chat("Memory: /gamble memory <einsatz> | pick <1-12>   Texturpack-Info: /gamble pack", Formatting.WHITE);
 		chat("Menüs: /gamble menu <automaten|wuerfel|karten|risiko|sonstiges|rennen|blackjack|poker|mines|shop>", Formatting.WHITE);
 		chat("Mini-Games: /gamble rps | plinko | scratch | reflex (go) | tower (door, towercash) | mines | daily", Formatting.WHITE);
-		chat("/gamble shop  →  /gamble buy <item>  |  equip <item>  |  unequip <title|sound>", Formatting.WHITE);
+		chat("/gamble shop (Fenster)  |  buy <item>  |  equip <item>  |  unequip <title|sound|color|frame|banner|back>", Formatting.WHITE);
 		chat("/gamble reset", Formatting.WHITE);
 		return 1;
 	}
@@ -2052,7 +2078,7 @@ public class FunGambleClient implements ClientModInitializer {
 		if (item.type().equals("ring")) {
 			status = item.price() + " Spielgeld (du hast: " + rings + ")";
 			color = Formatting.WHITE;
-		} else if (item.id().equals(activeTitle) || item.id().equals(activeSound)) {
+		} else if (isActive(item)) {
 			status = "[aktiv]";
 			color = Formatting.GREEN;
 		} else if (owned.contains(item.id())) {
@@ -2068,7 +2094,7 @@ public class FunGambleClient implements ClientModInitializer {
 	static void shopClick(Item item) {
 		if (item.type().equals("ring")) {
 			buy(item.id());
-		} else if (item.id().equals(activeTitle) || item.id().equals(activeSound)) {
+		} else if (isActive(item)) {
 			unequip(item.type());
 		} else if (owned.contains(item.id())) {
 			equip(item.id());
@@ -2099,35 +2125,120 @@ public class FunGambleClient implements ClientModInitializer {
 		};
 	}
 
-	private static Text balanceText() {
-		Item title = findItem(activeTitle);
-		String prefix = title != null ? "[" + title.name() + "] " : "";
-		return Text.literal(prefix + "Kontostand: " + balance + " Spielgeld").formatted(Formatting.GOLD);
+	// ---------- Kosmetik ----------
+
+	private static final Formatting[] RAINBOW = {Formatting.RED, Formatting.GOLD, Formatting.YELLOW, Formatting.GREEN,
+		Formatting.AQUA, Formatting.BLUE, Formatting.LIGHT_PURPLE};
+	private static final Formatting[] FIRE = {Formatting.RED, Formatting.GOLD, Formatting.YELLOW};
+
+	static String activeFor(String type) {
+		return switch (type) {
+			case "title" -> activeTitle;
+			case "sound" -> activeSound;
+			case "color" -> activeColor;
+			case "frame" -> activeFrame;
+			case "banner" -> activeBanner;
+			case "back" -> activeBack;
+			default -> "";
+		};
 	}
 
-	private static int showShop() {
-		chat("=== Spielgeld-Shop ===", Formatting.GOLD);
-		chat(balanceText());
-		for (Item item : ITEMS) {
-			String status;
-			Formatting color;
-			if (item.type().equals("ring")) {
-				status = item.price() + " Spielgeld (du hast: " + rings + ")";
-				color = Formatting.WHITE;
-			} else if (item.id().equals(activeTitle) || item.id().equals(activeSound)) {
-				status = "[aktiv]";
-				color = Formatting.GREEN;
-			} else if (owned.contains(item.id())) {
-				status = "[gekauft]";
-				color = Formatting.YELLOW;
-			} else {
-				status = item.price() + " Spielgeld";
-				color = Formatting.WHITE;
-			}
-			chat(item.name() + " (" + item.desc() + ") – " + status + "  →  /gamble buy " + item.id(), color);
+	private static void setActive(String type, String id) {
+		switch (type) {
+			case "title" -> activeTitle = id;
+			case "sound" -> activeSound = id;
+			case "color" -> activeColor = id;
+			case "frame" -> activeFrame = id;
+			case "banner" -> activeBanner = id;
+			case "back" -> activeBack = id;
+			default -> { }
 		}
-		chat("Ausrüsten: /gamble equip <item>   Ablegen: /gamble unequip <title|sound>", Formatting.GRAY);
-		return 1;
+	}
+
+	static boolean isActive(Item item) {
+		return !item.type().equals("ring") && item.id().equals(activeFor(item.type()));
+	}
+
+	static List<Item> itemsOfType(String type) {
+		List<Item> out = new ArrayList<>();
+		for (Item item : ITEMS) {
+			if (item.type().equals(type)) {
+				out.add(item);
+			}
+		}
+		return out;
+	}
+
+	/** Faerbt jeden Buchstaben der Reihe nach mit den Farben der Palette. */
+	private static Text patternText(String s, Formatting[] palette, int offset) {
+		var t = Text.literal("");
+		for (int i = 0; i < s.length(); i++) {
+			t.append(Text.literal(String.valueOf(s.charAt(i))).formatted(palette[Math.floorMod(i + offset, palette.length)]));
+		}
+		return t;
+	}
+
+	private static Formatting themeColor() {
+		return switch (activeColor) {
+			case "c_smaragd" -> Formatting.GREEN;
+			case "c_ozean" -> Formatting.AQUA;
+			case "c_rubin" -> Formatting.RED;
+			case "c_violett" -> Formatting.LIGHT_PURPLE;
+			default -> Formatting.GOLD;
+		};
+	}
+
+	/** Text im gewaehlten Farbstil (der Regenbogen laeuft animiert durch). */
+	private static Text styled(String s) {
+		if (activeColor.equals("c_regenbogen")) {
+			int offset = (int) ((System.currentTimeMillis() / 150) % RAINBOW.length);
+			return patternText(s, RAINBOW, offset);
+		}
+		return Text.literal(s).formatted(themeColor());
+	}
+
+	private static String[] frameParts() {
+		return switch (activeFrame) {
+			case "f_tilde" -> new String[]{"~ ", " ~"};
+			case "f_sterne" -> new String[]{"* ", " *"};
+			case "f_pfeile" -> new String[]{"<< ", " >>"};
+			case "f_klammern" -> new String[]{"[[ ", " ]]"};
+			case "f_linien" -> new String[]{"=== ", " ==="};
+			default -> new String[]{"", ""};
+		};
+	}
+
+	private static void showWinBanner(long win) {
+		int offset = (int) ((System.currentTimeMillis() / 100) % RAINBOW.length);
+		Text banner;
+		if (activeBanner.equals("b_konfetti")) {
+			banner = patternText("*** GEWINN +" + win + " ***", RAINBOW, offset);
+		} else if (activeBanner.equals("b_gold")) {
+			banner = Text.literal("$$$ GEWINN +" + win + " $$$").formatted(Formatting.GOLD);
+		} else if (activeBanner.equals("b_feuer")) {
+			banner = patternText("^^^ GEWINN +" + win + " ^^^", FIRE, offset);
+		} else {
+			return;
+		}
+		overlay(banner);
+		chat(banner);
+	}
+
+	private static String backIcon() {
+		return switch (activeBack) {
+			case "k_rot" -> "\uE116";
+			case "k_gold" -> "\uE117";
+			default -> ICON_BIG_BACK;
+		};
+	}
+
+	// ---------- Shop ----------
+
+	private static Text balanceText() {
+		Item title = findItem(activeTitle);
+		String[] frame = frameParts();
+		String prefix = title != null ? "[" + title.name() + "] " : "";
+		return styled(frame[0] + prefix + "Kontostand: " + balance + " Spielgeld" + frame[1]);
 	}
 
 	private static int buy(String id) {
@@ -2155,11 +2266,7 @@ public class FunGambleClient implements ClientModInitializer {
 			chat("Gekauft: " + item.name() + " (jetzt: " + rings + ")", Formatting.GREEN);
 		} else {
 			owned.add(id);
-			if (item.type().equals("title")) {
-				activeTitle = id;
-			} else {
-				activeSound = id;
-			}
+			setActive(item.type(), id);
 			chat("Gekauft und ausgerüstet: " + item.name(), Formatting.GREEN);
 		}
 		save();
@@ -2178,25 +2285,21 @@ public class FunGambleClient implements ClientModInitializer {
 			chat("Das gehört dir noch nicht. Kaufe es mit /gamble buy " + id + ".", Formatting.YELLOW);
 			return 0;
 		}
-		if (item.type().equals("title")) {
-			activeTitle = id;
-		} else {
-			activeSound = id;
-		}
+		setActive(item.type(), id);
 		save();
 		chat("Ausgerüstet: " + item.name(), Formatting.GREEN);
 		return 1;
 	}
 
 	private static int unequip(String type) {
-		if (type.equals("title")) {
-			activeTitle = "";
-		} else {
-			activeSound = "";
-		}
+		setActive(type, "");
 		save();
-		chat("Abgelegt.", Formatting.YELLOW);
+		chat("Abgelegt (Standard).", Formatting.YELLOW);
 		return 1;
+	}
+
+	static void uiUnequip(String type) {
+		unequip(type);
 	}
 
 	// ---------- Speichern ----------
@@ -2223,6 +2326,10 @@ public class FunGambleClient implements ClientModInitializer {
 			}
 			activeTitle = p.getProperty("title", "");
 			activeSound = p.getProperty("sound", "");
+			activeColor = p.getProperty("color", "");
+			activeFrame = p.getProperty("frame", "");
+			activeBanner = p.getProperty("banner", "");
+			activeBack = p.getProperty("back", "");
 			rings = Integer.parseInt(p.getProperty("rings", "0"));
 			lastDaily = p.getProperty("lastDaily", "");
 			dailyStreak = Integer.parseInt(p.getProperty("streak", "0"));
@@ -2238,6 +2345,10 @@ public class FunGambleClient implements ClientModInitializer {
 			p.setProperty("owned", String.join(",", owned));
 			p.setProperty("title", activeTitle);
 			p.setProperty("sound", activeSound);
+			p.setProperty("color", activeColor);
+			p.setProperty("frame", activeFrame);
+			p.setProperty("banner", activeBanner);
+			p.setProperty("back", activeBack);
 			p.setProperty("rings", Integer.toString(rings));
 			p.setProperty("lastDaily", lastDaily);
 			p.setProperty("streak", Integer.toString(dailyStreak));
