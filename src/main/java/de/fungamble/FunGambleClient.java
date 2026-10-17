@@ -40,7 +40,7 @@ import java.util.function.Supplier;
  * Der Server (und andere Spieler) bekommen davon nichts mit.
  * Spielgeld ist nicht echt und hat nichts mit Items im Spiel zu tun.
  *
- * Version 2.2: ueber 25 Spiele, Menues, Shop, Daily, Memory, Texturpack-Bilder + Kosmetik-Shop.
+ * Version 2.3: ueber 25 Spiele, Menues, Shop, Daily, Memory, Texturpack-Bilder, Kosmetik und 3D-Huete.
  */
 public class FunGambleClient implements ClientModInitializer {
 
@@ -103,7 +103,16 @@ public class FunGambleClient implements ClientModInitializer {
 		new Item("b_feuer", "Feuer-Banner", "banner", 3000, "Gewinn-Banner"),
 		// Kosmetik: Kartenruecken (brauchen das Texturpack)
 		new Item("k_rot", "Kartenrücken Rot (Texturpack)", "back", 1500, "Kartenrücken"),
-		new Item("k_gold", "Kartenrücken Schwarz-Gold (Texturpack)", "back", 3000, "Kartenrücken")
+		new Item("k_gold", "Kartenrücken Schwarz-Gold (Texturpack)", "back", 3000, "Kartenrücken"),
+		// Kosmetik: 3D-Huete (Texturpack noetig, der Hut wird per /give geholt)
+		new Item("hat_party", "Partyhut", "hat", 1000, "Hut"),
+		new Item("hat_propeller", "Propellermütze", "hat", 1500, "Hut"),
+		new Item("hat_santa", "Weihnachtsmütze", "hat", 2000, "Hut"),
+		new Item("hat_cowboy", "Cowboyhut", "hat", 2500, "Hut"),
+		new Item("hat_zylinder", "Zylinder", "hat", 3000, "Hut"),
+		new Item("hat_pirat", "Piratenhut", "hat", 4000, "Hut"),
+		new Item("hat_magier", "Zauberhut", "hat", 6000, "Hut"),
+		new Item("hat_krone", "Krone", "hat", 10000, "Hut")
 	);
 
 	static final LinkedHashSet<String> owned = new LinkedHashSet<>();
@@ -379,6 +388,14 @@ public class FunGambleClient implements ClientModInitializer {
 		MinecraftClient mc = MinecraftClient.getInstance();
 		if (mc.player != null) {
 			mc.player.sendMessage(text, false); // nur lokal sichtbar
+		}
+	}
+
+	/** Wie chat(), wird aber nicht in den Statuszeilen der Menues angezeigt (der Kontostand steht dort schon oben). */
+	private static void chatOnly(Text text) {
+		MinecraftClient mc = MinecraftClient.getInstance();
+		if (mc.player != null) {
+			mc.player.sendMessage(text, false);
 		}
 	}
 
@@ -983,7 +1000,7 @@ public class FunGambleClient implements ClientModInitializer {
 		save();
 		sound(SoundEvents.ENTITY_PLAYER_LEVELUP, 1.0f);
 		chat("Tägliche Belohnung: +" + reward + " Spielgeld (Serie: " + dailyStreak + " Tage)", Formatting.GREEN);
-		chat(balanceText());
+		chatOnly(balanceText());
 		return 1;
 	}
 
@@ -1916,7 +1933,7 @@ public class FunGambleClient implements ClientModInitializer {
 			chat("Verloren! -" + (bet - payout) + " Spielgeld", Formatting.RED);
 			sound(SoundEvents.ENTITY_VILLAGER_NO, 1.0f);
 		}
-		chat(balanceText());
+		chatOnly(balanceText());
 
 		if (balance <= 0) {
 			chat("Pleite! Mit /gamble reset startest du neu.", Formatting.DARK_RED);
@@ -1946,7 +1963,7 @@ public class FunGambleClient implements ClientModInitializer {
 	}
 
 	private static int showBalance() {
-		chat(balanceText());
+		chatOnly(balanceText());
 		return 1;
 	}
 
@@ -2082,7 +2099,7 @@ public class FunGambleClient implements ClientModInitializer {
 			status = "[aktiv]";
 			color = Formatting.GREEN;
 		} else if (owned.contains(item.id())) {
-			status = "[gekauft]";
+			status = item.type().equals("hat") ? "[gekauft – klicken zum Holen]" : "[gekauft]";
 			color = Formatting.YELLOW;
 		} else {
 			status = item.price() + " Spielgeld";
@@ -2241,6 +2258,30 @@ public class FunGambleClient implements ClientModInitializer {
 		return styled(frame[0] + prefix + "Kontostand: " + balance + " Spielgeld" + frame[1]);
 	}
 
+	/** Holt den Hut per /give (Cheats oder OP noetig). Der Hut ist ein Papier mit Hut-Modell aus dem Texturpack. */
+	private static int giveHat(String id) {
+		Item item = findItem(id);
+		if (item == null || !item.type().equals("hat")) {
+			chat("Diesen Hut gibt es nicht.", Formatting.RED);
+			return 0;
+		}
+		if (!owned.contains(id)) {
+			chat("Kaufe den Hut zuerst im Shop.", Formatting.YELLOW);
+			return 0;
+		}
+		MinecraftClient mc = MinecraftClient.getInstance();
+		if (mc.player == null || mc.player.networkHandler == null) {
+			chat("Du musst in einer Welt sein, um den Hut zu holen.", Formatting.YELLOW);
+			return 0;
+		}
+		String command = "give @s minecraft:paper[minecraft:item_model=\"fungamble:" + id + "\","
+			+ "minecraft:equippable={slot:\"head\"},minecraft:max_stack_size=1,"
+			+ "minecraft:custom_name={text:\"" + item.name() + "\",italic:false,color:\"gold\"}]";
+		mc.player.networkHandler.sendChatCommand(command);
+		chat("Hut angefordert: " + item.name() + ". Rechtsklick mit dem Item in der Hand setzt ihn auf (Cheats/OP und Texturpack nötig).", Formatting.AQUA);
+		return 1;
+	}
+
 	private static int buy(String id) {
 		if (isBusy()) {
 			chat("Beende erst deine laufende Runde!", Formatting.YELLOW);
@@ -2266,12 +2307,19 @@ public class FunGambleClient implements ClientModInitializer {
 			chat("Gekauft: " + item.name() + " (jetzt: " + rings + ")", Formatting.GREEN);
 		} else {
 			owned.add(id);
-			setActive(item.type(), id);
-			chat("Gekauft und ausgerüstet: " + item.name(), Formatting.GREEN);
+			if (item.type().equals("hat")) {
+				chat("Gekauft: " + item.name(), Formatting.GREEN);
+			} else {
+				setActive(item.type(), id);
+				chat("Gekauft und ausgerüstet: " + item.name(), Formatting.GREEN);
+			}
 		}
 		save();
 		sound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 1.2f);
-		chat(balanceText());
+		chatOnly(balanceText());
+		if (item.type().equals("hat")) {
+			giveHat(id);
+		}
 		return 1;
 	}
 
@@ -2284,6 +2332,9 @@ public class FunGambleClient implements ClientModInitializer {
 		if (!owned.contains(id)) {
 			chat("Das gehört dir noch nicht. Kaufe es mit /gamble buy " + id + ".", Formatting.YELLOW);
 			return 0;
+		}
+		if (item.type().equals("hat")) {
+			return giveHat(id);
 		}
 		setActive(item.type(), id);
 		save();
