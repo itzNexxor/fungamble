@@ -40,7 +40,7 @@ import java.util.function.Supplier;
  * Der Server (und andere Spieler) bekommen davon nichts mit.
  * Spielgeld ist nicht echt und hat nichts mit Items im Spiel zu tun.
  *
- * Version 2.3: ueber 25 Spiele, Menues, Shop, Daily, Memory, Texturpack-Bilder, Kosmetik und 3D-Huete.
+ * Version 2.5: ueber 30 Spiele inkl. Arcade, Menues, Shop, Kosmetik, 3D-Huete und mehr Bilder aus dem Texturpack.
  */
 public class FunGambleClient implements ClientModInitializer {
 
@@ -189,6 +189,23 @@ public class FunGambleClient implements ClientModInitializer {
 	private static final String[] ICON_SUIT = {"\uE010", "\uE011", "\uE012", "\uE013"};
 	private static final String[] ICON_BIG = {"\uE100", "\uE101", "\uE102", "\uE103", "\uE104", "\uE105"};
 	private static final String ICON_BIG_BACK = "\uE114";
+	// Zweites Bildpaket (Arcade, Angeln, Chips ...)
+	private static final String[] ICON_FISH = {"\uE200", "\uE201", "\uE202", "\uE203", "\uE204", "\uE205"};
+	private static final String ICON_BOBBER = "\uE206";
+	private static final String ICON_DARTBOARD = "\uE208";
+	private static final String ICON_DART = "\uE209";
+	private static final String ICON_BOW = "\uE20C";
+	private static final String ICON_TARGET = "\uE20D";
+	private static final String ICON_MOLE_BIG = "\uE30A";
+	private static final String ICON_HOLE_BIG = "\uE30B";
+	private static final String[] ICON_PAD_BIG = {"\uE310", "\uE311", "\uE312", "\uE313", "\uE314", "\uE315", "\uE316", "\uE317"};
+	private static final String[] ICON_CHIP = {"\uE218", "\uE219", "\uE21A", "\uE21B"};
+	private static final String ICON_BINGO = "\uE21C";
+	private static final String ICON_HORSE = "\uE21D";
+	private static final String ICON_TROPHY = "\uE21E";
+	private static final String ICON_CLOVER = "\uE21F";
+	private static long pack2CheckedAt = 0;
+	private static boolean pack2Cached = false;
 	private static long packCheckedAt = 0;
 	private static boolean packCached = false;
 
@@ -202,6 +219,50 @@ public class FunGambleClient implements ClientModInitializer {
 	private static int memoryMoves = 0;
 	private static int memoryPairs = 0;
 	private static int memoryHide = 0;
+
+	// Arcade: Bogenschiessen
+	private static boolean archeryActive = false;
+	private static long archeryBet = 0;
+	private static int archeryPos = 0;
+	private static int archeryDir = 1;
+	private static int archeryTicks = 0;
+
+	// Arcade: Maulwurf-Jagd
+	private static boolean whackActive = false;
+	private static long whackBet = 0;
+	private static int whackTime = 0;
+	private static int whackScore = 0;
+	private static int whackMole = -1;
+	private static int whackLife = 0;
+	private static int whackNext = 0;
+
+	// Arcade: Simon sagt (Farben merken)
+	private static final String[] SIMON_NAMES = {"Rot", "Blau", "Grün", "Gelb"};
+	private static final Formatting[] SIMON_COLORS = {Formatting.RED, Formatting.BLUE, Formatting.GREEN, Formatting.YELLOW};
+	private static boolean simonActive = false;
+	private static long simonBet = 0;
+	private static final List<Integer> simonSeq = new ArrayList<>();
+	private static int simonPhase = 0; // 0 aus, 1 zeigen, 2 du bist dran
+	private static int simonShowIdx = 0;
+	private static int simonTimer = 0;
+	private static int simonLit = -1;
+	private static int simonInput = 0;
+
+	// Arcade: Rechenblitz
+	private static boolean mathActive = false;
+	private static long mathBet = 0;
+	private static int mathRound = 0;
+	private static int mathCorrect = 0;
+	private static String mathQuestion = "";
+	private static final int[] mathAnswers = new int[4];
+	private static int mathCorrectIdx = 0;
+	private static int mathTimer = 0;
+
+	// Arcade: Bingo, Dart, Angeln
+	private static final double[] BINGO_PAY = {0, 0, 0, 0.3, 0.5, 1.5, 4, 20, 100, 300};
+	private static final String[] FISH_NAMES = {"Alter Stiefel", "Kleiner Fisch", "Forelle", "Lachs", "Goldfisch", "Schatztruhe"};
+	private static final double[] FISH_P = {0.30, 0.40, 0.18, 0.08, 0.035, 0.005};
+	private static final double[] FISH_MULT = {0, 0.6, 1.3, 2.2, 5, 30};
 
 	// Taegliche Belohnung
 	private static String lastDaily = "";
@@ -297,7 +358,7 @@ public class FunGambleClient implements ClientModInitializer {
 			LiteralArgumentBuilder<FabricClientCommandSource> menuNode =
 				ClientCommandManager.literal("menu").executes(ctx -> openMenu());
 			for (String n : new String[]{"automaten", "wuerfel", "karten", "risiko", "sonstiges", "rennen",
-				"blackjack", "poker", "mines", "memory", "shop"}) {
+				"blackjack", "poker", "mines", "memory", "arcade", "whack", "simon", "math", "shop"}) {
 				menuNode.then(ClientCommandManager.literal(n).executes(ctx -> openScreenByName(n)));
 			}
 			root.then(menuNode);
@@ -357,6 +418,27 @@ public class FunGambleClient implements ClientModInitializer {
 			root.then(lit("pick").then(intArg("karte", 1, 12).executes(ctx ->
 				memoryFlip(IntegerArgumentType.getInteger(ctx, "karte") - 1))));
 			root.then(lit("pack").executes(ctx -> packInfo()));
+
+			// Arcade
+			root.then(lit("bingo").then(bet().executes(ctx -> play(ctx, FunGambleClient::bingo))));
+			root.then(lit("dart").then(bet().executes(ctx -> play(ctx, FunGambleClient::dart))));
+			root.then(lit("fishing").then(bet().executes(ctx -> play(ctx, FunGambleClient::fishing))));
+			root.then(lit("archery").then(bet().executes(ctx -> startArchery(LongArgumentType.getLong(ctx, "einsatz")))));
+			root.then(lit("shoot").executes(ctx -> archeryShoot()));
+			root.then(lit("whack").then(bet().executes(ctx -> startWhack(LongArgumentType.getLong(ctx, "einsatz")))));
+			root.then(lit("whackhit").then(intArg("feld", 1, 9).executes(ctx ->
+				whackHit(IntegerArgumentType.getInteger(ctx, "feld") - 1))));
+			root.then(lit("simon").then(bet().executes(ctx -> startSimon(LongArgumentType.getLong(ctx, "einsatz")))));
+			LiteralArgumentBuilder<FabricClientCommandSource> colorNode = lit("color");
+			String[] colorIds = {"rot", "blau", "gruen", "gelb"};
+			for (int i = 0; i < colorIds.length; i++) {
+				final int c = i;
+				colorNode.then(lit(colorIds[i]).executes(ctx -> simonPress(c)));
+			}
+			root.then(colorNode);
+			root.then(lit("math").then(bet().executes(ctx -> startMath(LongArgumentType.getLong(ctx, "einsatz")))));
+			root.then(lit("answer").then(intArg("antwort", 1, 4).executes(ctx ->
+				mathAnswer(IntegerArgumentType.getInteger(ctx, "antwort") - 1))));
 
 			// Blackjack: Verdoppeln
 			root.then(lit("double").executes(ctx -> bjDouble()));
@@ -424,7 +506,8 @@ public class FunGambleClient implements ClientModInitializer {
 
 	private static boolean isBusy() {
 		return running != null || crashActive || bjActive || reflexState != 0 || towerActive || minesActive
-			|| ladderActive || streakActive || pokerState == 1 || memoryActive;
+			|| ladderActive || streakActive || pokerState == 1 || memoryActive
+			|| archeryActive || whackActive || simonActive || mathActive;
 	}
 
 	private static Text reel(int s) {
@@ -450,9 +533,45 @@ public class FunGambleClient implements ClientModInitializer {
 		return packCached;
 	}
 
+	/** Das neue Texturpack mit den Bildern fuer Arcade, Angeln, Chips usw. */
+	static boolean pack2Active() {
+		long now = System.currentTimeMillis();
+		if (now - pack2CheckedAt > 1500) {
+			pack2CheckedAt = now;
+			try {
+				MinecraftClient mc = MinecraftClient.getInstance();
+				pack2Cached = mc.getResourceManager()
+					.getResource(Identifier.of("fungamble", "textures/font/icons2.png")).isPresent();
+			} catch (Exception e) {
+				pack2Cached = false;
+			}
+		}
+		return pack2Cached;
+	}
+
+	/** Text mit einem Bild davor (ohne Texturpack nur der Text). Das Bild selbst bleibt ungefaerbt. */
+	private static Text withIcon(String icon, String text, Formatting color) {
+		Text body = Text.literal(text).formatted(color);
+		if (!pack2Active()) {
+			return body;
+		}
+		return Text.literal(icon + " ").append(body);
+	}
+
+	static String chipIcon(long amount) {
+		if (!pack2Active()) {
+			return "";
+		}
+		String icon = amount <= 100 ? ICON_CHIP[0] : (amount <= 1000 ? ICON_CHIP[1] : (amount <= 5000 ? ICON_CHIP[2] : ICON_CHIP[3]));
+		return icon + " ";
+	}
+
 	static Text packStatusText() {
-		if (packActive()) {
+		if (pack2Active()) {
 			return Text.literal("Texturpack aktiv – Bilder werden angezeigt").formatted(Formatting.GREEN);
+		}
+		if (packActive()) {
+			return Text.literal("Altes Texturpack – lade das neue für alle Bilder (/gamble pack)").formatted(Formatting.YELLOW);
 		}
 		return Text.literal("Kein Texturpack erkannt – es gibt nur Text (siehe /gamble pack)").formatted(Formatting.YELLOW);
 	}
@@ -999,7 +1118,7 @@ public class FunGambleClient implements ClientModInitializer {
 		balance += reward;
 		save();
 		sound(SoundEvents.ENTITY_PLAYER_LEVELUP, 1.0f);
-		chat("Tägliche Belohnung: +" + reward + " Spielgeld (Serie: " + dailyStreak + " Tage)", Formatting.GREEN);
+		chat(withIcon(ICON_CLOVER, "Tägliche Belohnung: +" + reward + " Spielgeld (Serie: " + dailyStreak + " Tage)", Formatting.GREEN));
 		chatOnly(balanceText());
 		return 1;
 	}
@@ -1181,7 +1300,8 @@ public class FunGambleClient implements ClientModInitializer {
 	// Pferderennen: Fuenf Pferde mit unterschiedlichen Quoten
 	static String raceLabel(int i) {
 		double o = RACE_ODDS[i];
-		return RACE_NAMES[i] + " x" + (o == Math.floor(o) ? String.valueOf((int) o) : String.valueOf(o));
+		String label = RACE_NAMES[i] + " x" + (o == Math.floor(o) ? String.valueOf((int) o) : String.valueOf(o));
+		return pack2Active() ? ICON_HORSE + " " + label : label;
 	}
 
 	private static Game race(int horse) {
@@ -1644,13 +1764,521 @@ public class FunGambleClient implements ClientModInitializer {
 	}
 
 	private static int packInfo() {
-		if (packActive()) {
-			chat("Das Fun-Gamble-Texturpack ist aktiv. Slots, Würfel, Karten, Mines und Memory zeigen Bilder.", Formatting.GREEN);
+		if (pack2Active()) {
+			chat("Das Fun-Gamble-Texturpack ist aktiv. Alle Spiele zeigen Bilder, Hüte sind verfügbar.", Formatting.GREEN);
+		} else if (packActive()) {
+			chat("Dein Texturpack ist veraltet: Für die Arcade-Spiele, Chips und Hüte fehlen Bilder.", Formatting.YELLOW);
+			chat("Ersetze es durch die neue FunGamble-Texturpack.zip und lade mit F3 + T neu.", Formatting.YELLOW);
 		} else {
 			chat("Kein Texturpack erkannt. Kopiere FunGamble-Texturpack.zip in den Ordner resourcepacks und aktiviere es", Formatting.YELLOW);
 			chat("unter Optionen → Ressourcenpakete. Dann zeigen Slots, Würfel, Karten, Mines und Memory Bilder.", Formatting.YELLOW);
 		}
 		return 1;
+	}
+
+	// ---------- Arcade: Bingo, Dart, Angeln ----------
+
+	private static int bingoHits(int[] card, int[] drawn, int upTo) {
+		int hits = 0;
+		for (int c : card) {
+			for (int i = 0; i < upTo; i++) {
+				if (drawn[i] == c) {
+					hits++;
+					break;
+				}
+			}
+		}
+		return hits;
+	}
+
+	private static String bingoCardText(int[] card, int[] drawn, int upTo) {
+		StringBuilder sb = new StringBuilder();
+		for (int c : card) {
+			boolean hit = false;
+			for (int i = 0; i < upTo; i++) {
+				if (drawn[i] == c) {
+					hit = true;
+					break;
+				}
+			}
+			if (sb.length() > 0) sb.append(' ');
+			sb.append(hit ? "[" + c + "]" : String.valueOf(c));
+		}
+		return sb.toString();
+	}
+
+	private static int[] pickNumbers(int count) {
+		List<Integer> pool = new ArrayList<>();
+		for (int i = 1; i <= 30; i++) {
+			pool.add(i);
+		}
+		Collections.shuffle(pool, RNG);
+		int[] out = new int[count];
+		for (int i = 0; i < count; i++) {
+			out[i] = pool.get(i);
+		}
+		return out;
+	}
+
+	// Bingo: Du bekommst 9 Zahlen, es werden 12 von 30 gezogen. Je mehr Treffer, desto mehr Gewinn.
+	private static Game bingo() {
+		final int[] card = pickNumbers(9);
+		final int[] drawn = pickNumbers(12);
+		final int hits = bingoHits(card, drawn, 12);
+		final Text result = withIcon(ICON_BINGO, "Bingo: " + hits + " Treffer  –  " + bingoCardText(card, drawn, 12), Formatting.GOLD);
+
+		IntConsumer tick = t -> {
+			if (t % 8 == 0 && t / 8 <= 12) {
+				int k = t / 8;
+				int h = bingoHits(card, drawn, k);
+				overlay(Text.literal("Bingo! Gezogen: " + drawn[k - 1] + "   " + bingoCardText(card, drawn, k) + "   Treffer: " + h).formatted(Formatting.GOLD));
+				boolean wasHit = bingoHits(card, drawn, k) > bingoHits(card, drawn, k - 1);
+				sound(wasHit ? SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP : SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.0f + 0.03f * k);
+			}
+		};
+		return new Game(BINGO_PAY[hits], result, 12 * 8 + 6, tick);
+	}
+
+	// Dart: Ein Wurf auf die Scheibe
+	private static Game dart() {
+		double r = RNG.nextDouble();
+		final String ring;
+		final double mult;
+		if (r < 0.03) {
+			ring = "BULLSEYE!";
+			mult = 10.0;
+		} else if (r < 0.15) {
+			ring = "Innenring";
+			mult = 2.5;
+		} else if (r < 0.40) {
+			ring = "Mittelring";
+			mult = 0.8;
+		} else if (r < 0.70) {
+			ring = "Außenring";
+			mult = 0.4;
+		} else {
+			ring = "Daneben";
+			mult = 0.0;
+		}
+		final Text result = withIcon(ICON_DARTBOARD, "Dart: " + ring + "  (" + wheelLabel(mult) + ")", Formatting.GOLD);
+
+		IntConsumer tick = t -> {
+			if (t % 4 == 0 && t < 24) {
+				overlay(withIcon(ICON_DART, "Der Pfeil fliegt" + ".".repeat(1 + (t / 4) % 3), Formatting.GOLD));
+				sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 1.0f + (t / 40.0f));
+			}
+		};
+		return new Game(mult, result, 28, tick);
+	}
+
+	// Angeln: Was beisst an?
+	private static Game fishing() {
+		double r = RNG.nextDouble();
+		int pick = FISH_P.length - 1;
+		double acc = 0;
+		for (int i = 0; i < FISH_P.length; i++) {
+			acc += FISH_P[i];
+			if (r < acc) {
+				pick = i;
+				break;
+			}
+		}
+		final int fish = pick;
+		final double mult = FISH_MULT[fish];
+		final Text result = withIcon(ICON_FISH[fish], "Du fängst: " + FISH_NAMES[fish] + "  (" + wheelLabel(mult) + ")",
+			mult >= 1.0 ? Formatting.GREEN : Formatting.GRAY);
+
+		IntConsumer tick = t -> {
+			if (t == 1) {
+				overlay(withIcon(ICON_BOBBER, "Die Angel wird ausgeworfen...", Formatting.AQUA));
+				sound(SoundEvents.BLOCK_LEVER_CLICK, 0.8f);
+			} else if (t > 20 && t < 50 && t % 6 == 0) {
+				overlay(withIcon(ICON_BOBBER, "Warte auf einen Biss" + ".".repeat(1 + (t / 6) % 3), Formatting.AQUA));
+			} else if (t == 50) {
+				overlay(withIcon(ICON_BOBBER, "BISS!", Formatting.GOLD));
+				sound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 1.4f);
+			}
+		};
+		return new Game(mult, result, 70, tick);
+	}
+
+	// ---------- Arcade: Bogenschiessen (Timing) ----------
+
+	static int startArchery(long bet) {
+		if (isBusy()) {
+			chat("Beende erst deine laufende Runde!", Formatting.YELLOW);
+			return 0;
+		}
+		if (bet > balance) {
+			chat("Nicht genug Spielgeld! Du hast nur " + balance + ".", Formatting.RED);
+			return 0;
+		}
+		balance -= bet;
+		save();
+		archeryBet = bet;
+		archeryPos = RNG.nextInt(31);
+		archeryDir = RNG.nextBoolean() ? 1 : -1;
+		archeryTicks = 0;
+		archeryActive = true;
+		chat("Bogenschießen! Drücke SCHUSS, wenn der Punkt in der Mitte (|) ist.", Formatting.AQUA);
+		return 1;
+	}
+
+	private static String archeryBar() {
+		StringBuilder sb = new StringBuilder("[");
+		for (int i = 0; i <= 30; i++) {
+			sb.append(i == archeryPos ? 'O' : (i == 15 ? '|' : '.'));
+		}
+		return sb.append(']').toString();
+	}
+
+	private static void tickArchery() {
+		archeryTicks++;
+		archeryPos += archeryDir;
+		if (archeryPos >= 30) {
+			archeryPos = 30;
+			archeryDir = -1;
+		} else if (archeryPos <= 0) {
+			archeryPos = 0;
+			archeryDir = 1;
+		}
+		overlay(withIcon(ICON_BOW, archeryBar(), Formatting.GOLD));
+		if (archeryTicks > 200) {
+			archeryActive = false;
+			chat("Zu langsam! Der Schuss ist verfallen.", Formatting.RED);
+			payoutAndReport(archeryBet, 0.0);
+		}
+	}
+
+	static int archeryShoot() {
+		if (!archeryActive) {
+			chat("Kein laufendes Bogenschießen. Starte eins im Arcade-Menü.", Formatting.YELLOW);
+			return 0;
+		}
+		archeryActive = false;
+		int dist = Math.abs(archeryPos - 15);
+		double mult;
+		String hit;
+		if (dist == 0) {
+			mult = 7.0;
+			hit = "Volltreffer!";
+		} else if (dist <= 1) {
+			mult = 3.5;
+			hit = "Fast genau in der Mitte!";
+		} else if (dist <= 3) {
+			mult = 1.8;
+			hit = "Guter Schuss";
+		} else if (dist <= 6) {
+			mult = 0.9;
+			hit = "Äußerer Ring";
+		} else if (dist <= 10) {
+			mult = 0.3;
+			hit = "Am Rand";
+		} else {
+			mult = 0.0;
+			hit = "Daneben";
+		}
+		sound(SoundEvents.BLOCK_LEVER_CLICK, 1.3f);
+		overlay(withIcon(ICON_TARGET, archeryBar() + "  " + hit, Formatting.GOLD));
+		chat("Schuss: " + hit, Formatting.AQUA);
+		payoutAndReport(archeryBet, mult);
+		return 1;
+	}
+
+	// ---------- Arcade: Maulwurf-Jagd ----------
+
+	private static double whackMultiplier(int score) {
+		if (score >= 12) return 4.0;
+		if (score >= 10) return 2.5;
+		if (score >= 8) return 1.5;
+		if (score >= 6) return 1.0;
+		if (score >= 3) return 0.5;
+		return 0.0;
+	}
+
+	static int startWhack(long bet) {
+		if (isBusy()) {
+			chat("Beende erst deine laufende Runde!", Formatting.YELLOW);
+			return 0;
+		}
+		if (bet > balance) {
+			chat("Nicht genug Spielgeld! Du hast nur " + balance + ".", Formatting.RED);
+			return 0;
+		}
+		balance -= bet;
+		save();
+		whackBet = bet;
+		whackTime = 300;
+		whackScore = 0;
+		whackMole = -1;
+		whackLife = 0;
+		whackNext = 10;
+		whackActive = true;
+		chat("Maulwurf-Jagd! 15 Sekunden: klicke auf die Maulwürfe (ab 3 Treffern gibt es etwas zurück).", Formatting.AQUA);
+		return 1;
+	}
+
+	private static void tickWhack() {
+		whackTime--;
+		if (whackMole >= 0) {
+			whackLife--;
+			if (whackLife <= 0) {
+				whackMole = -1;
+				whackNext = 2 + RNG.nextInt(6);
+			}
+		} else {
+			whackNext--;
+			if (whackNext <= 0) {
+				whackMole = RNG.nextInt(9);
+				whackLife = 12 + RNG.nextInt(9);
+			}
+		}
+		if (whackTime % 5 == 0) {
+			overlay(Text.literal("Maulwurf-Jagd: Treffer " + whackScore + "   Zeit: " + (whackTime / 20 + 1) + "s").formatted(Formatting.GOLD));
+		}
+		if (whackTime <= 0) {
+			whackActive = false;
+			whackMole = -1;
+			chat("Zeit ist um! Treffer: " + whackScore, Formatting.AQUA);
+			payoutAndReport(whackBet, whackMultiplier(whackScore));
+		}
+	}
+
+	static int whackHit(int index) {
+		if (!whackActive) {
+			chat("Keine laufende Maulwurf-Jagd. Starte eine im Arcade-Menü.", Formatting.YELLOW);
+			return 0;
+		}
+		if (index == whackMole) {
+			whackScore++;
+			whackMole = -1;
+			whackNext = 2 + RNG.nextInt(5);
+			sound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 1.2f);
+			return 1;
+		}
+		sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 0.6f);
+		return 0;
+	}
+
+	static Text whackCellLabel(int i) {
+		boolean pack2 = pack2Active();
+		if (whackActive && i == whackMole) {
+			return pack2 ? Text.literal(ICON_MOLE_BIG) : Text.literal("MAULWURF").formatted(Formatting.RED);
+		}
+		if (pack2) {
+			return Text.literal(ICON_HOLE_BIG);
+		}
+		return Text.literal(whackActive ? "-" : "?").formatted(Formatting.GRAY);
+	}
+
+	// ---------- Arcade: Simon sagt ----------
+
+	private static double simonMultiplier(int length) {
+		if (length >= 10) return 15.0;
+		if (length >= 9) return 10.0;
+		if (length >= 8) return 6.0;
+		if (length >= 7) return 3.5;
+		if (length >= 6) return 2.0;
+		if (length >= 5) return 1.2;
+		if (length >= 4) return 0.7;
+		if (length >= 3) return 0.3;
+		return 0.0;
+	}
+
+	static int startSimon(long bet) {
+		if (isBusy()) {
+			chat("Beende erst deine laufende Runde!", Formatting.YELLOW);
+			return 0;
+		}
+		if (bet > balance) {
+			chat("Nicht genug Spielgeld! Du hast nur " + balance + ".", Formatting.RED);
+			return 0;
+		}
+		balance -= bet;
+		save();
+		simonBet = bet;
+		simonSeq.clear();
+		simonSeq.add(RNG.nextInt(4));
+		simonActive = true;
+		simonPhase = 1;
+		simonShowIdx = 0;
+		simonLit = -1;
+		simonTimer = 20;
+		simonInput = 0;
+		chat("Simon sagt: Merke dir die Farben und klicke sie in derselben Reihenfolge. Je länger, desto mehr Gewinn!", Formatting.AQUA);
+		return 1;
+	}
+
+	private static void tickSimon() {
+		simonTimer--;
+		if (simonTimer > 0) {
+			return;
+		}
+		if (simonLit >= 0) {
+			simonLit = -1;
+			simonShowIdx++;
+			simonTimer = 6;
+		} else if (simonShowIdx < simonSeq.size()) {
+			simonLit = simonSeq.get(simonShowIdx);
+			simonTimer = 14;
+			sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 0.8f + 0.2f * simonLit);
+			overlay(Text.literal("Merke dir die Farben! (Länge " + simonSeq.size() + ")").formatted(Formatting.GOLD));
+		} else {
+			simonPhase = 2;
+			simonInput = 0;
+			overlay(Text.literal("Du bist dran!").formatted(Formatting.GREEN));
+		}
+	}
+
+	static int simonPress(int color) {
+		if (!simonActive || simonPhase != 2) {
+			return 0;
+		}
+		sound(SoundEvents.BLOCK_WOODEN_BUTTON_CLICK_ON, 0.8f + 0.2f * color);
+		if (simonSeq.get(simonInput) != color) {
+			simonActive = false;
+			simonPhase = 0;
+			int done = simonSeq.size() - 1;
+			chat("Falsch! Du hast Länge " + done + " geschafft.", Formatting.RED);
+			payoutAndReport(simonBet, simonMultiplier(done));
+			return 1;
+		}
+		simonInput++;
+		if (simonInput >= simonSeq.size()) {
+			int length = simonSeq.size();
+			if (length >= 10) {
+				simonActive = false;
+				simonPhase = 0;
+				chat("Perfekt! Länge 10 geschafft!", Formatting.GOLD);
+				payoutAndReport(simonBet, simonMultiplier(length));
+			} else {
+				chat("Richtig! Länge " + length + " geschafft. Weiter...", Formatting.GREEN);
+				simonSeq.add(RNG.nextInt(4));
+				simonPhase = 1;
+				simonShowIdx = 0;
+				simonLit = -1;
+				simonTimer = 20;
+			}
+		}
+		return 1;
+	}
+
+	static Text simonLabel(int c) {
+		if (pack2Active()) {
+			return Text.literal(ICON_PAD_BIG[c * 2 + ((simonPhase == 1 && simonLit == c) ? 1 : 0)]);
+		}
+		if (simonPhase == 1 && simonLit == c) {
+			return Text.literal("*** " + SIMON_NAMES[c].toUpperCase() + " ***").formatted(SIMON_COLORS[c]);
+		}
+		return Text.literal(SIMON_NAMES[c]).formatted(SIMON_COLORS[c]);
+	}
+
+	// ---------- Arcade: Rechenblitz ----------
+
+	private static double mathMultiplier(int correct) {
+		if (correct >= 5) return 3.0;
+		if (correct >= 4) return 1.6;
+		if (correct >= 3) return 0.9;
+		return 0.0;
+	}
+
+	private static void nextMathQuestion() {
+		int type = RNG.nextInt(3);
+		int answer;
+		String q;
+		if (type == 0) {
+			int a = 5 + RNG.nextInt(40);
+			int b = 5 + RNG.nextInt(40);
+			answer = a + b;
+			q = a + " + " + b;
+		} else if (type == 1) {
+			int a = 20 + RNG.nextInt(60);
+			int b = 5 + RNG.nextInt(a - 10);
+			answer = a - b;
+			q = a + " - " + b;
+		} else {
+			int a = 3 + RNG.nextInt(8);
+			int b = 3 + RNG.nextInt(8);
+			answer = a * b;
+			q = a + " × " + b;
+		}
+		List<Integer> options = new ArrayList<>();
+		options.add(answer);
+		while (options.size() < 4) {
+			int wrong = answer + RNG.nextInt(11) - 5;
+			if (wrong != answer && wrong >= 0 && !options.contains(wrong)) {
+				options.add(wrong);
+			}
+		}
+		Collections.shuffle(options, RNG);
+		for (int i = 0; i < 4; i++) {
+			mathAnswers[i] = options.get(i);
+		}
+		mathCorrectIdx = options.indexOf(answer);
+		mathQuestion = q;
+		mathTimer = 100;
+	}
+
+	static int startMath(long bet) {
+		if (isBusy()) {
+			chat("Beende erst deine laufende Runde!", Formatting.YELLOW);
+			return 0;
+		}
+		if (bet > balance) {
+			chat("Nicht genug Spielgeld! Du hast nur " + balance + ".", Formatting.RED);
+			return 0;
+		}
+		balance -= bet;
+		save();
+		mathBet = bet;
+		mathRound = 0;
+		mathCorrect = 0;
+		mathActive = true;
+		nextMathQuestion();
+		chat("Rechenblitz! 5 Aufgaben, je 5 Sekunden. Ab 3 richtigen Antworten gibt es etwas zurück.", Formatting.AQUA);
+		return 1;
+	}
+
+	private static void tickMath() {
+		mathTimer--;
+		if (mathTimer % 5 == 0) {
+			overlay(Text.literal("Frage " + (mathRound + 1) + "/5:  " + mathQuestion + " = ?   (" + (mathTimer / 20 + 1) + "s)").formatted(Formatting.GOLD));
+		}
+		if (mathTimer <= 0) {
+			mathAdvance(false);
+		}
+	}
+
+	static int mathAnswer(int index) {
+		if (!mathActive) {
+			return 0;
+		}
+		mathAdvance(index == mathCorrectIdx);
+		return 1;
+	}
+
+	private static void mathAdvance(boolean correct) {
+		if (correct) {
+			mathCorrect++;
+			sound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 1.2f);
+		} else {
+			sound(SoundEvents.ENTITY_VILLAGER_NO, 1.0f);
+		}
+		mathRound++;
+		if (mathRound >= 5) {
+			mathActive = false;
+			chat("Richtige Antworten: " + mathCorrect + " von 5", Formatting.AQUA);
+			payoutAndReport(mathBet, mathMultiplier(mathCorrect));
+		} else {
+			nextMathQuestion();
+		}
+	}
+
+	static Text mathAnswerLabel(int i) {
+		if (!mathActive) {
+			return Text.literal("?").formatted(Formatting.GRAY);
+		}
+		return Text.literal(String.valueOf(mathAnswers[i]));
 	}
 
 	// ---------- Crash ----------
@@ -1867,6 +2495,18 @@ public class FunGambleClient implements ClientModInitializer {
 		if (reflexState != 0) {
 			tickReflex();
 		}
+		if (archeryActive) {
+			tickArchery();
+		}
+		if (whackActive) {
+			tickWhack();
+		}
+		if (simonPhase == 1) {
+			tickSimon();
+		}
+		if (mathActive) {
+			tickMath();
+		}
 		if (memoryHide > 0) {
 			memoryHide--;
 			if (memoryHide == 0) {
@@ -1954,6 +2594,7 @@ public class FunGambleClient implements ClientModInitializer {
 		chat("/gamble blackjack <einsatz>  →  /gamble hit | stand", Formatting.WHITE);
 		chat("Karten: blackjack (hit, stand, double) | poker (hold, draw) | baccarat | ladder (up, down, laddercash)", Formatting.WHITE);
 		chat("Würfel: dice100 | craps | sicbo | lotto | cups | chests | race | streak (flip, streakcash)", Formatting.WHITE);
+		chat("Arcade: /gamble bingo | dart | fishing | archery (shoot) | whack (whackhit) | simon (color) | math (answer)", Formatting.WHITE);
 		chat("Memory: /gamble memory <einsatz> | pick <1-12>   Texturpack-Info: /gamble pack", Formatting.WHITE);
 		chat("Menüs: /gamble menu <automaten|wuerfel|karten|risiko|sonstiges|rennen|blackjack|poker|mines|shop>", Formatting.WHITE);
 		chat("Mini-Games: /gamble rps | plinko | scratch | reflex (go) | tower (door, towercash) | mines | daily", Formatting.WHITE);
@@ -1999,6 +2640,10 @@ public class FunGambleClient implements ClientModInitializer {
 			case "poker" -> new PokerScreen();
 			case "mines" -> new MinesScreen();
 			case "memory" -> new MemoryScreen();
+			case "arcade" -> new ArcadeScreen();
+			case "whack" -> new WhackScreen();
+			case "simon" -> new SimonScreen();
+			case "math" -> new MathScreen();
 			case "shop" -> new ShopScreen();
 			default -> new GambleScreen();
 		};
@@ -2014,15 +2659,20 @@ public class FunGambleClient implements ClientModInitializer {
 		return balance;
 	}
 
+	private static boolean liveOverlay() {
+		return running != null || crashActive || reflexState != 0 || archeryActive || whackActive
+			|| simonPhase == 1 || mathActive;
+	}
+
 	static Text statusLine1() {
-		if (running != null || crashActive || reflexState != 0) {
+		if (liveOverlay()) {
 			return lastOverlay;
 		}
 		return recentLine(1);
 	}
 
 	static Text statusLine2() {
-		if (running != null || crashActive || reflexState != 0) {
+		if (liveOverlay()) {
 			return recentLine(1);
 		}
 		return recentLine(2);
@@ -2075,6 +2725,17 @@ public class FunGambleClient implements ClientModInitializer {
 	static void uiStreakCash() { streakCash(); }
 	static void uiBjDouble() { bjDouble(); }
 	static void uiMemoryStart(long bet) { memoryStart(bet); }
+	static void uiBingo(long bet) { startGame(bet, FunGambleClient::bingo); }
+	static void uiDart(long bet) { startGame(bet, FunGambleClient::dart); }
+	static void uiFishing(long bet) { startGame(bet, FunGambleClient::fishing); }
+	static void uiArcheryStart(long bet) { startArchery(bet); }
+	static void uiArcheryShoot() { archeryShoot(); }
+	static void uiWhackStart(long bet) { startWhack(bet); }
+	static void uiWhackHit(int i) { whackHit(i); }
+	static void uiSimonStart(long bet) { startSimon(bet); }
+	static void uiSimonPress(int c) { simonPress(c); }
+	static void uiMathStart(long bet) { startMath(bet); }
+	static void uiMathAnswer(int i) { mathAnswer(i); }
 	static void uiMemoryFlip(int i) { memoryFlip(i); }
 
 	static Text dice100ThresholdLabel() {
@@ -2236,6 +2897,9 @@ public class FunGambleClient implements ClientModInitializer {
 			banner = patternText("^^^ GEWINN +" + win + " ^^^", FIRE, offset);
 		} else {
 			return;
+		}
+		if (pack2Active()) {
+			banner = Text.literal(ICON_TROPHY + " ").append(banner);
 		}
 		overlay(banner);
 		chat(banner);
