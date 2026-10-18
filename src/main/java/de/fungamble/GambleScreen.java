@@ -41,11 +41,12 @@ public class GambleScreen extends CasinoScreen {
 		btn(2, 1, y, "Memory (Texturpack) →", () -> open(new MemoryScreen()));
 		y += ROW;
 
-		btn(2, 0, y, "Shop →", () -> open(new ShopScreen()));
-		btn(2, 1, y, "Tägliche Belohnung", FunGambleClient::uiDaily);
+		btn(2, 0, y, "Arcade →", () -> open(new ArcadeScreen()));
+		btn(2, 1, y, "Shop →", () -> open(new ShopScreen()));
 		y += ROW;
 
-		wide(y, "Schließen", this::close);
+		btn(2, 0, y, "Tägliche Belohnung", FunGambleClient::uiDaily);
+		btn(2, 1, y, "Schließen", this::close);
 
 		refresh();
 	}
@@ -75,7 +76,9 @@ abstract class CasinoScreen extends Screen {
 
 	static Text betText() {
 		String amount = BETS[betIndex] < 0 ? "ALL-IN (" + bet() + ")" : String.valueOf(BETS[betIndex]);
-		return Text.literal("Einsatz: " + amount + "  (klicken zum Ändern)").formatted(Formatting.AQUA);
+		Text label = Text.literal("Einsatz: " + amount + "  (klicken zum Ändern)").formatted(Formatting.AQUA);
+		String chip = FunGambleClient.chipIcon(bet());
+		return chip.isEmpty() ? label : Text.literal(chip).append(label);
 	}
 
 	static void open(Screen screen) {
@@ -492,6 +495,159 @@ class PokerScreen extends CasinoScreen {
 		for (int i = 0; i < cards.length; i++) {
 			if (cards[i] != null) {
 				cards[i].setMessage(FunGambleClient.pokerCardLabel(i));
+			}
+		}
+	}
+}
+
+/** Arcade: Geschicklichkeits- und Schnellspiele. */
+class ArcadeScreen extends CasinoScreen {
+
+	ArcadeScreen() {
+		super("Arcade");
+	}
+
+	@Override
+	protected void init() {
+		int y = startY(8);
+		y = header(y, true);
+
+		btn(3, 0, y, "Bingo", () -> FunGambleClient.uiBingo(bet()));
+		btn(3, 1, y, "Dart", () -> FunGambleClient.uiDart(bet()));
+		btn(3, 2, y, "Angeln", () -> FunGambleClient.uiFishing(bet()));
+		y += ROW;
+
+		btn(2, 0, y, "Bogen: Start", () -> FunGambleClient.uiArcheryStart(bet()));
+		btn(2, 1, y, "SCHUSS!", FunGambleClient::uiArcheryShoot);
+		y += ROW;
+
+		btn(2, 0, y, "Maulwurf-Jagd →", () -> open(new WhackScreen()));
+		btn(2, 1, y, "Simon sagt →", () -> open(new SimonScreen()));
+		y += ROW;
+
+		btn(2, 0, y, "Rechenblitz →", () -> open(new MathScreen()));
+		btn(2, 1, y, "Zurück", () -> open(new GambleScreen()));
+		refresh();
+	}
+}
+
+/** Maulwurf-Jagd: 3x3 Felder, klicke die Maulwuerfe schnell an. */
+class WhackScreen extends CasinoScreen {
+
+	private final ButtonWidget[] cells = new ButtonWidget[9];
+
+	WhackScreen() {
+		super("Maulwurf-Jagd");
+	}
+
+	@Override
+	protected void init() {
+		final int cellH = 28;
+		final int gap = 2;
+		int total = 5 * ROW + 3 * (cellH + gap);
+		int y = Math.max(4, (this.height - total) / 2);
+		y = header(y, true);
+
+		btn(2, 0, y, "Start", () -> FunGambleClient.uiWhackStart(bet()));
+		btn(2, 1, y, "Zurück zur Arcade", () -> open(new ArcadeScreen()));
+		y += ROW;
+
+		for (int r = 0; r < 3; r++) {
+			for (int c = 0; c < 3; c++) {
+				final int index = r * 3 + c;
+				cells[index] = buttonH(colX(3, c), y, colWidth(3), cellH, "?", () -> FunGambleClient.uiWhackHit(index));
+			}
+			y += cellH + gap;
+		}
+		refresh();
+	}
+
+	@Override
+	protected void refresh() {
+		super.refresh();
+		for (int i = 0; i < cells.length; i++) {
+			if (cells[i] != null) {
+				cells[i].setMessage(FunGambleClient.whackCellLabel(i));
+			}
+		}
+	}
+}
+
+/** Simon sagt: Farben merken und nachklicken. */
+class SimonScreen extends CasinoScreen {
+
+	private final ButtonWidget[] colors = new ButtonWidget[4];
+
+	SimonScreen() {
+		super("Simon sagt");
+	}
+
+	@Override
+	protected void init() {
+		final int btnH = 40;
+		int total = 5 * ROW + btnH;
+		int y = Math.max(4, (this.height - total) / 2);
+		y = header(y, true);
+
+		btn(2, 0, y, "Start", () -> FunGambleClient.uiSimonStart(bet()));
+		btn(2, 1, y, "Zurück zur Arcade", () -> open(new ArcadeScreen()));
+		y += ROW;
+
+		for (int i = 0; i < 4; i++) {
+			final int c = i;
+			colors[i] = buttonH(colX(4, i), y, colWidth(4), btnH, "?", () -> FunGambleClient.uiSimonPress(c));
+		}
+		refresh();
+	}
+
+	@Override
+	protected void refresh() {
+		super.refresh();
+		for (int i = 0; i < colors.length; i++) {
+			if (colors[i] != null) {
+				colors[i].setMessage(FunGambleClient.simonLabel(i));
+			}
+		}
+	}
+}
+
+/** Rechenblitz: schnell im Kopf rechnen. */
+class MathScreen extends CasinoScreen {
+
+	private final ButtonWidget[] answers = new ButtonWidget[4];
+
+	MathScreen() {
+		super("Rechenblitz");
+	}
+
+	@Override
+	protected void init() {
+		final int btnH = 28;
+		final int gap = 2;
+		int total = 5 * ROW + 2 * (btnH + gap);
+		int y = Math.max(4, (this.height - total) / 2);
+		y = header(y, true);
+
+		btn(2, 0, y, "Start", () -> FunGambleClient.uiMathStart(bet()));
+		btn(2, 1, y, "Zurück zur Arcade", () -> open(new ArcadeScreen()));
+		y += ROW;
+
+		for (int r = 0; r < 2; r++) {
+			for (int c = 0; c < 2; c++) {
+				final int index = r * 2 + c;
+				answers[index] = buttonH(colX(2, c), y, colWidth(2), btnH, "?", () -> FunGambleClient.uiMathAnswer(index));
+			}
+			y += btnH + gap;
+		}
+		refresh();
+	}
+
+	@Override
+	protected void refresh() {
+		super.refresh();
+		for (int i = 0; i < answers.length; i++) {
+			if (answers[i] != null) {
+				answers[i].setMessage(FunGambleClient.mathAnswerLabel(i));
 			}
 		}
 	}
